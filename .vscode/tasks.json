@@ -4,8 +4,12 @@
 		{
 			"type": "cargo",
 			"command": "build",
-			"args": ["--release"],
-			"problemMatcher": ["$rustc"],
+			"args": [
+				"--release"
+			],
+			"problemMatcher": [
+				"$rustc"
+			],
 			"group": "build",
 			"label": "cargo build --release"
 		},
@@ -25,7 +29,9 @@
 				"echo": true,
 				"reveal": "always"
 			},
-			"dependsOn": ["cargo build --release"],
+			"dependsOn": [
+				"cargo build --release"
+			],
 			"dependsOrder": "sequence"
 		}
 	]

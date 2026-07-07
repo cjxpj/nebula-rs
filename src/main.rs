@@ -3,10 +3,12 @@ mod ast;
 mod canvas;
 mod count;
 mod executor;
+mod file_lock;
 mod functions;
 mod iftext;
 mod interpreter;
 mod parser;
+mod updater;
 mod value;
 
 use std::io::{self, Write};
@@ -113,23 +115,76 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let exe_name = args.get(0).map(|s| s.as_str()).unwrap_or("nebula");
 
-    // nebula file.nr        → 批处理模式
-    // nebula -i file.nr     → 交互 REPL 模式
-    let (interactive, file_path) = if args.len() >= 3 && args[1] == "-i" {
-        (true, args[2].as_str())
-    } else if args.len() >= 2 {
-        if args[1] == "-h" || args[1] == "--help" {
-            println!("用法:");
-            println!("  {} <文件路径>          批处理模式（执行 main 函数）", exe_name);
-            println!("  {} -i <文件路径>       交互 REPL 模式", exe_name);
-            println!("  {} -h                  显示帮助", exe_name);
+    // 解析可选参数
+    let mut check_update = false;
+    let mut do_update = false;
+    let mut repo = String::new();
+    let mut asset_filter = String::new();
+    let mut interactive = false;
+    let mut file_path: Option<&str> = None;
+
+    // 简单的手动参数解析
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-h" | "--help" => {
+                print_help(exe_name);
+                return;
+            }
+            "--check-update" | "-c" => check_update = true,
+            "--update" | "-u" => do_update = true,
+            "--repo" => {
+                i += 1;
+                if i < args.len() {
+                    repo = args[i].clone();
+                }
+            }
+            "--asset" => {
+                i += 1;
+                if i < args.len() {
+                    asset_filter = args[i].clone();
+                }
+            }
+            "-i" => {
+                interactive = true;
+                i += 1;
+                if i < args.len() {
+                    file_path = Some(&args[i]);
+                }
+            }
+            arg if !arg.starts_with('-') => {
+                file_path = Some(&args[i]);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // 更新相关命令优先处理
+    if check_update {
+        let result = updater::run_check(&repo);
+        if let Err(e) = result {
+            eprintln!("\x1b[31m{}\x1b[0m", e);
+        }
+        return;
+    }
+
+    if do_update {
+        let result = updater::run_update(&repo, &asset_filter);
+        if let Err(e) = result {
+            eprintln!("\x1b[31m{}\x1b[0m", e);
+        }
+        return;
+    }
+
+    let file_path = match file_path {
+        Some(p) => p,
+        None => {
+            eprintln!("用法: {} <文件路径>", exe_name);
+            eprintln!("      {} -i <文件路径>  (交互模式)", exe_name);
+            eprintln!("      {} --help          (帮助)", exe_name);
             return;
         }
-        (false, args[1].as_str())
-    } else {
-        eprintln!("用法: {} <文件路径>", exe_name);
-        eprintln!("      {} -i <文件路径>  (交互模式)", exe_name);
-        return;
     };
 
     let result = if interactive {
@@ -141,4 +196,23 @@ fn main() {
     if let Err(e) = result {
         eprintln!("\x1b[31m{}\x1b[0m", e);
     }
+}
+
+fn print_help(exe_name: &str) {
+    println!("Nebula 脚本引擎 v{}", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!("用法:");
+    println!("  {} <文件路径>              批处理模式（执行 main 函数）", exe_name);
+    println!("  {} -i <文件路径>           交互 REPL 模式", exe_name);
+    println!();
+    println!("更新命令:");
+    println!("  {} --check-update [-c]     检测是否有新版本", exe_name);
+    println!("  {} --update [-u]           下载并安装最新版本", exe_name);
+    println!();
+    println!("更新选项:");
+    println!("  --repo <owner/name>       指定 GitHub 仓库地址");
+    println!("  --asset <关键词>          指定下载资源的匹配关键词");
+    println!();
+    println!("其他:");
+    println!("  {} -h, --help              显示帮助", exe_name);
 }

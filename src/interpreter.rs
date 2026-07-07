@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -6,6 +6,7 @@ use crate::value::DicVal;
 use crate::parser::{BuildDic, BuildValue};
 use crate::analyzer::val_text_test;
 use crate::iftext::IfText;
+use crate::file_lock;
 
 /* ===================== 状态机 ===================== */
 
@@ -550,62 +551,63 @@ impl DicContext {
         }
 
         // 检查文件修改时间，仅在文件变更时重新加载
-        if let Ok(metadata) = std::fs::metadata(&actual_path) {
-            if let Ok(mtime) = metadata.modified() {
-                let shared = Arc::make_mut(&mut self.shared);
-                if let Some(&last_mtime) = shared.package_mtimes.get(pkg_name) {
-                    if mtime <= last_mtime {
-                        return; // 文件未修改，跳过
-                    }
-                }
-                shared.package_mtimes.insert(pkg_name.to_string(), mtime);
-            }
-        }
-
-        if let Ok(data) = std::fs::read_to_string(&actual_path) {
-            if let Ok(pkg_bv) = crate::parser::build_dic(&actual_path, &data) {
-                // 处理头部赋值行（引入包不执行非赋值 head 行）
-                for line in &pkg_bv.head {
-                    let (pv_type, pv_prefix, pv_suffix) = val_text_test(line);
-                    if pv_type == 6 && !pv_prefix.is_empty() {
-                        let processed = self.val.text(&pv_suffix);
-                        let final_val = if pv_suffix.starts_with('[') && pv_suffix.ends_with(']') {
-                            crate::count::run_count_text(&self.val, &processed)
-                        } else {
-                            processed
-                        };
-                        self.val.p.set_string(&pv_prefix, final_val.clone());
-                    }
-                }
-                // 执行包的 [f]初始化 — 用临时 ctx 避免污染当前输出
-                for func in &pkg_bv.local_func {
-                    if func.trigger == "初始化" {
-                        let mut tmp_ctx = self.clone();
-                        tmp_ctx.output.clear();
-                        tmp_ctx.sys.source_file = if func.source_file.is_empty() { actual_path.clone() } else { func.source_file.clone() };
-                        tmp_ctx.sys.line_offset = func.line;
-                        tmp_ctx.val.p.set_string("触发", format!("{}.初始化", pkg_name));
-                        tmp_ctx.val.p.set_string("_", pkg_name.to_string());
-                        entry(&mut tmp_ctx, &func.text);
-                        if tmp_ctx.sys.stop { self.sys.stop = true; }
-                        let init_out = tmp_ctx.output.get();
-                        if !init_out.is_empty() {
-                            self.output.add(&init_out);
+        let data = file_lock::with_file_read(std::path::Path::new(&actual_path), || {
+            if let Ok(metadata) = std::fs::metadata(&actual_path) {
+                if let Ok(mtime) = metadata.modified() {
+                    let shared = Arc::make_mut(&mut self.shared);
+                    if let Some(&last_mtime) = shared.package_mtimes.get(pkg_name) {
+                        if mtime <= last_mtime {
+                            return None; // 文件未修改，跳过
                         }
                     }
+                    shared.package_mtimes.insert(pkg_name.to_string(), mtime);
                 }
-                // 标准库包：注册函数到 builtins
-                if let Some(module) = crate::functions::is_stdlib_package(&pkg_bv) {
-                    let module = module.to_string();
-                    crate::functions::StdLib::register_module(self, &module);
-                }
-                // 清除 stdlib 标记
-                let mut pkg_bv = pkg_bv;
-                pkg_bv.head.retain(|line| !line.starts_with("@stdlib="));
-                // 替换缓存中的包
-                let shared = Arc::make_mut(&mut self.shared);
-                shared.packages.insert(pkg_name.to_string(), pkg_bv);
             }
+            std::fs::read_to_string(&actual_path).ok()
+        });
+        let Some(data) = data else { return; };
+        if let Ok(pkg_bv) = crate::parser::build_dic(&actual_path, &data) {
+            // 处理头部赋值行（引入包不执行非赋值 head 行）
+            for line in &pkg_bv.head {
+                let (pv_type, pv_prefix, pv_suffix) = val_text_test(line);
+                if pv_type == 6 && !pv_prefix.is_empty() {
+                    let processed = self.val.text(&pv_suffix);
+                    let final_val = if pv_suffix.starts_with('[') && pv_suffix.ends_with(']') {
+                        crate::count::run_count_text(&self.val, &processed)
+                    } else {
+                        processed
+                    };
+                    self.val.p.set_string(&pv_prefix, final_val.clone());
+                }
+            }
+            // 执行包的 [f]初始化 — 用临时 ctx 避免污染当前输出
+            for func in &pkg_bv.local_func {
+                if func.trigger == "初始化" {
+                    let mut tmp_ctx = self.clone();
+                    tmp_ctx.output.clear();
+                    tmp_ctx.sys.source_file = if func.source_file.is_empty() { actual_path.clone() } else { func.source_file.clone() };
+                    tmp_ctx.sys.line_offset = func.line;
+                    tmp_ctx.val.p.set_string("触发", format!("{}.初始化", pkg_name));
+                    tmp_ctx.val.p.set_string("_", pkg_name.to_string());
+                    entry(&mut tmp_ctx, &func.text);
+                    if tmp_ctx.sys.stop { self.sys.stop = true; }
+                    let init_out = tmp_ctx.output.get();
+                    if !init_out.is_empty() {
+                        self.output.add(&init_out);
+                    }
+                }
+            }
+            // 标准库包：注册函数到 builtins
+            if let Some(module) = crate::functions::is_stdlib_package(&pkg_bv) {
+                let module = module.to_string();
+                crate::functions::StdLib::register_module(self, &module);
+            }
+            // 清除 stdlib 标记
+            let mut pkg_bv = pkg_bv;
+            pkg_bv.head.retain(|line| !line.starts_with("@stdlib="));
+            // 替换缓存中的包
+            let shared = Arc::make_mut(&mut self.shared);
+            shared.packages.insert(pkg_name.to_string(), pkg_bv);
         }
     }
 
@@ -631,7 +633,7 @@ impl DicContext {
         // 先尝试加载同名 .nr 文件（如 web.nr 配套 web/ 目录），执行其 head 和 init
         let nr_file = format!("{}.nr", dir_path);
         if std::path::Path::new(&nr_file).is_file() {
-            if let Ok(data) = std::fs::read_to_string(&nr_file) {
+            if let Ok(data) = file_lock::with_file_read(std::path::Path::new(&nr_file), || std::fs::read_to_string(&nr_file)) {
                 if let Ok(file_bv) = crate::parser::build_dic(&nr_file, &data) {
                     // 处理头部赋值行（引入包不执行非赋值 head 行）
                     for line in &file_bv.head {

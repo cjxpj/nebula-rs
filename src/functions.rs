@@ -1,6 +1,7 @@
 use crate::interpreter::{DicContext, BuiltinFn, entry};
 use crate::parser::BuildValue;
 use crate::canvas;
+use crate::file_lock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::io::Read;
@@ -2218,7 +2219,8 @@ fn write_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -
     if let Some(parent) = std::path::Path::new(&path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    match std::fs::write(&path, &data) {
+    let path_buf = std::path::PathBuf::from(&path);
+    match file_lock::with_file_write(&path_buf, || std::fs::write(&path, &data)) {
         Ok(()) => None,
         Err(e) => Some(format!("[错误] {} 写文件失败: {}", ctx.sys.file_location(), e)),
     }
@@ -2231,7 +2233,8 @@ fn read_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) ->
     if path.is_empty() {
         return Some(default);
     }
-    match std::fs::read_to_string(&path) {
+    let path_buf = std::path::PathBuf::from(&path);
+    match file_lock::with_file_read(&path_buf, || std::fs::read_to_string(&path)) {
         Ok(s) => {
             let s = s.replace("\r\n", "\n")     // CRLF 字节 → LF
                      .replace('\r', "\n");       // 独立 CR 字节 → LF
@@ -2251,37 +2254,39 @@ fn write_key_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &st
         return Some(format!("[错误] {} 写 需要路径参数", ctx.sys.file_location()));
     }
     let path = format!("database/{}", key);
-    let data = std::fs::read_to_string(&path).unwrap_or_default();
-    let lines: Vec<&str> = data.lines().collect();
-    let now = format_local_time();
-    let mut new_lines: Vec<String> = Vec::new();
-    new_lines.push(format!("更新时间: {}", now));
-    let mut found = false;
-    for (i, line) in lines.iter().enumerate() {
-        if i == 0 { continue; }
-        if found {
-            // 已找到并替换，剩余行原样保留
-            new_lines.push(line.to_string());
-        } else if let Some(eq_pos) = line.find('=') {
-            let k = &line[..eq_pos];
-            if k == subkey {
-                new_lines.push(format!("{}={}", subkey, value));
-                found = true;
+    let path_buf = std::path::PathBuf::from(&path);
+    file_lock::with_file_write(&path_buf, || {
+        let data = std::fs::read_to_string(&path).unwrap_or_default();
+        let lines: Vec<&str> = data.lines().collect();
+        let now = format_local_time();
+        let mut new_lines: Vec<String> = Vec::new();
+        new_lines.push(format!("更新时间: {}", now));
+        let mut found = false;
+        for (i, line) in lines.iter().enumerate() {
+            if i == 0 { continue; }
+            if found {
+                new_lines.push(line.to_string());
+            } else if let Some(eq_pos) = line.find('=') {
+                let k = &line[..eq_pos];
+                if k == subkey {
+                    new_lines.push(format!("{}={}", subkey, value));
+                    found = true;
+                } else {
+                    new_lines.push(line.to_string());
+                }
             } else {
                 new_lines.push(line.to_string());
             }
-        } else {
-            new_lines.push(line.to_string());
         }
-    }
-    if !found {
-        new_lines.push(format!("{}={}", subkey, value));
-    }
-    let new_data = new_lines.join("\n");
-    if let Some(parent) = std::path::Path::new(&path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(&path, &new_data);
+        if !found {
+            new_lines.push(format!("{}={}", subkey, value));
+        }
+        let new_data = new_lines.join("\n");
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, &new_data);
+    });
     None
 }
 
@@ -2293,7 +2298,8 @@ fn read_key_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str
         return Some("[]".to_string());
     }
     let path = format!("database/{}", key);
-    let data = match std::fs::read_to_string(&path) {
+    let path_buf = std::path::PathBuf::from(&path);
+    let data = match file_lock::with_file_read(&path_buf, || std::fs::read_to_string(&path)) {
         Ok(s) => s,
         Err(_) => {
             if args.len() >= 4 {
@@ -2336,10 +2342,13 @@ fn read_key_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str
 fn delete_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     if path.is_empty() { return None; }
-    match std::fs::metadata(&path) {
-        Ok(meta) if meta.is_file() => { let _ = std::fs::remove_file(&path); }
-        _ => {}
-    }
+    let path_buf = std::path::PathBuf::from(&path);
+    file_lock::with_file_write(&path_buf, || {
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_file() => { let _ = std::fs::remove_file(&path); }
+            _ => {}
+        }
+    });
     None
 }
 
@@ -2347,31 +2356,44 @@ fn delete_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
 fn delete_dir_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     if path.is_empty() { return None; }
-    match std::fs::metadata(&path) {
-        Ok(meta) if meta.is_dir() => { let _ = std::fs::remove_dir_all(&path); }
-        _ => {}
-    }
+    let path_buf = std::path::PathBuf::from(&path);
+    file_lock::with_file_write(&path_buf, || {
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_dir() => { let _ = std::fs::remove_dir_all(&path); }
+            _ => {}
+        }
+    });
     None
 }
 
 /// $存在文件 路径$ — 判断是否为已存在的文件，返回 true/false（对标 Go fileExist）
 fn file_exist_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let exists = std::fs::metadata(&path).map(|m| m.is_file()).unwrap_or(false);
+    let path_buf = std::path::PathBuf::from(&path);
+    let exists = file_lock::with_file_read(&path_buf, || {
+        std::fs::metadata(&path).map(|m| m.is_file()).unwrap_or(false)
+    });
     Some(exists.to_string())
 }
 
 /// $存在文件夹 路径$ — 判断是否为已存在的文件夹，返回 true/false（对标 Go dirExist）
 fn dir_exist_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let exists = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
+    let path_buf = std::path::PathBuf::from(&path);
+    let exists = file_lock::with_file_read(&path_buf, || {
+        std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false)
+    });
     Some(exists.to_string())
 }
 
 /// $存在文件或文件夹 路径$ — 判断路径是否存在，返回 true/false（对标 Go fileOrDirExist）
 fn file_or_dir_exist_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    Some(std::path::Path::new(&path).exists().to_string())
+    let path_buf = std::path::PathBuf::from(&path);
+    let exists = file_lock::with_file_read(&path_buf, || {
+        std::path::Path::new(&path).exists()
+    });
+    Some(exists.to_string())
 }
 
 /// $文件后缀 路径$ — 获取文件扩展名，含前导点（对标 Go fileSuffix / filepath.Ext）
@@ -2405,7 +2427,8 @@ fn simple_rand(max: usize) -> usize {
 fn read_file_random_line_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let default = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
-    let content = match std::fs::read_to_string(&path) {
+    let path_buf = std::path::PathBuf::from(&path);
+    let content = match file_lock::with_file_read(&path_buf, || std::fs::read_to_string(&path)) {
         Ok(s) => s,
         Err(_) => return Some(default),
     };
@@ -2422,7 +2445,8 @@ fn read_file_lines_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> 
     let start: usize = args.get(2).and_then(|a| resolve_num(ctx, a)).unwrap_or(1).max(1);
     let count: usize = args.get(3).and_then(|a| resolve_num(ctx, a)).unwrap_or(1).max(1);
     let default = ctx.val.text(args.get(4).map(|s| s.as_str()).unwrap_or(""));
-    let content = match std::fs::read_to_string(&path) {
+    let path_buf = std::path::PathBuf::from(&path);
+    let content = match file_lock::with_file_read(&path_buf, || std::fs::read_to_string(&path)) {
         Ok(s) => s,
         Err(_) => return Some(default),
     };
@@ -2440,7 +2464,8 @@ fn read_file_lines_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> 
 fn read_file_lines_count_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let default = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
-    let content = match std::fs::read_to_string(&path) {
+    let path_buf = std::path::PathBuf::from(&path);
+    let content = match file_lock::with_file_read(&path_buf, || std::fs::read_to_string(&path)) {
         Ok(s) => s,
         Err(_) => return Some(default),
     };
@@ -2450,7 +2475,8 @@ fn read_file_lines_count_fn(ctx: &mut DicContext, args: &[String], _content: &st
 /// $文件夹列表 [路径]$ — 列出目录下的文件夹名，返回 JSON 数组（对标 Go dirList）
 fn dir_list_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let dirs: Vec<serde_json::Value> = match std::fs::read_dir(&path) {
+    let path_buf = std::path::PathBuf::from(&path);
+    let dirs: Vec<serde_json::Value> = match file_lock::with_file_read(&path_buf, || std::fs::read_dir(&path)) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
@@ -2464,7 +2490,8 @@ fn dir_list_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<
 /// $文件列表 [路径]$ — 列出目录下的文件名，返回 JSON 数组（对标 Go fileList）
 fn file_list_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let files: Vec<serde_json::Value> = match std::fs::read_dir(&path) {
+    let path_buf = std::path::PathBuf::from(&path);
+    let files: Vec<serde_json::Value> = match file_lock::with_file_read(&path_buf, || std::fs::read_dir(&path)) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
@@ -2478,7 +2505,8 @@ fn file_list_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option
 /// $随机文件夹名 [路径]$ — 随机返回目录下的一个文件夹名（对标 Go randomDirName）
 fn random_dir_name_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let dirs: Vec<String> = match std::fs::read_dir(&path) {
+    let path_buf = std::path::PathBuf::from(&path);
+    let dirs: Vec<String> = match file_lock::with_file_read(&path_buf, || std::fs::read_dir(&path)) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
@@ -2494,7 +2522,8 @@ fn random_dir_name_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> 
 /// $随机文件名 [路径]$ — 随机返回目录下的一个文件名（对标 Go randomFileName）
 fn random_file_name_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let files: Vec<String> = match std::fs::read_dir(&path) {
+    let path_buf = std::path::PathBuf::from(&path);
+    let files: Vec<String> = match file_lock::with_file_read(&path_buf, || std::fs::read_dir(&path)) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
@@ -2510,7 +2539,9 @@ fn random_file_name_fn(ctx: &mut DicContext, args: &[String], _content: &str) ->
 /// $文件夹大小 路径$ — 递归计算目录总大小（字节）（对标 Go dirSize）
 fn dir_size_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    Some(dir_calc_size(std::path::Path::new(&path)).to_string())
+    let path_buf = std::path::PathBuf::from(&path);
+    let size = file_lock::with_file_read(&path_buf, || dir_calc_size(std::path::Path::new(&path)));
+    Some(size.to_string())
 }
 
 fn dir_calc_size(path: &std::path::Path) -> u64 {
@@ -2529,7 +2560,10 @@ fn dir_calc_size(path: &std::path::Path) -> u64 {
 /// $文件大小 路径$ — 获取文件大小（字节）（对标 Go fileSize）
 fn file_size_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let path_buf = std::path::PathBuf::from(&path);
+    let size = file_lock::with_file_read(&path_buf, || {
+        std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+    });
     Some(size.to_string())
 }
 
@@ -2538,10 +2572,9 @@ fn file_rename_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
     let src = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let dst = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
     if src.is_empty() || dst.is_empty() { return Some("false".to_string()); }
-    match std::fs::rename(&src, &dst) {
-        Ok(()) => Some("true".to_string()),
-        Err(_) => Some("false".to_string()),
-    }
+    let dst_buf = std::path::PathBuf::from(&dst);
+    let ok = file_lock::with_file_write(&dst_buf, || std::fs::rename(&src, &dst).is_ok());
+    Some(ok.to_string())
 }
 
 /// $复制粘贴 原路径 目标路径$ — 复制文件或文件夹，返回 true/false（对标 Go fileCopy）
@@ -2549,11 +2582,14 @@ fn file_copy_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option
     let src = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let dst = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
     if src == dst || src.is_empty() || dst.is_empty() { return Some("false".to_string()); }
-    let ok = match std::fs::metadata(&src) {
-        Ok(meta) if meta.is_dir() => copy_dir_recursive(std::path::Path::new(&src), std::path::Path::new(&dst)).is_ok(),
-        Ok(_) => std::fs::copy(&src, &dst).is_ok(),
-        Err(_) => false,
-    };
+    let dst_buf = std::path::PathBuf::from(&dst);
+    let ok = file_lock::with_file_write(&dst_buf, || {
+        match std::fs::metadata(&src) {
+            Ok(meta) if meta.is_dir() => copy_dir_recursive(std::path::Path::new(&src), std::path::Path::new(&dst)).is_ok(),
+            Ok(_) => std::fs::copy(&src, &dst).is_ok(),
+            Err(_) => false,
+        }
+    });
     Some(ok.to_string())
 }
 
@@ -2585,8 +2621,9 @@ fn download_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
         .timeout_global(Some(std::time::Duration::from_secs(300)))
         .build()
         .into();
-    let result = || -> Result<(), String> {
-        let mut data = Vec::new();
+    // 先下载数据（不加锁，避免长时间阻塞其他文件操作）
+    let mut data = Vec::new();
+    if let Err(e) = (|| -> Result<(), String> {
         agent.get(&url)
             .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
             .call()
@@ -2594,10 +2631,15 @@ fn download_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
             .body_mut()
             .as_reader()
             .read_to_end(&mut data)
-            .map_err(|e| format!("读取失败: {}", e))?;
-        std::fs::write(&save_path, &data).map_err(|e| format!("写入失败: {}", e))
-    };
-    match result() {
+            .map_err(|e| format!("读取失败: {}", e))
+            .map(|_| ())
+    })() {
+        eprintln!("[Nebula] {}", e);
+        return Some(String::new());
+    }
+    // 写入文件时加写锁
+    let save_path_buf = std::path::PathBuf::from(&save_path);
+    match file_lock::with_file_write(&save_path_buf, || std::fs::write(&save_path, &data)) {
         Ok(()) => Some("true".to_string()),
         Err(e) => {
             eprintln!("[Nebula] {}", e);

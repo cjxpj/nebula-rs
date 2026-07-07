@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use crate::file_lock;
 
 /// 构建词条：触发词 → 代码块列表
 #[derive(Debug, Clone)]
@@ -177,7 +178,7 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
                         if !path.ends_with(".nr") {
                             return Err(format!("[错误] {} 第{}行: 引入文件必须为 .nr 后缀：{}（#引入={}）", _dic_path, dic_i + 1, path, path));
                         }
-                        match fs::read_to_string(path) {
+                        match file_lock::with_file_read(std::path::Path::new(path), || fs::read_to_string(path)) {
                             Ok(file_data) => Some(build_dic(_dic_path, &file_data)?),
                             Err(_) => None,
                         }
@@ -428,7 +429,9 @@ fn is_chinese_char(c: char) -> bool {
 
 /// 从文件加载并解析
 pub fn parse_file(path: &str) -> Result<BuildValue, String> {
-    let text = fs::read_to_string(path).map_err(|e| format!("读取文件失败: {}", e))?;
+    let text = file_lock::with_file_read(std::path::Path::new(path), || {
+        fs::read_to_string(path).map_err(|e| format!("读取文件失败: {}", e))
+    })?;
     build_dic(path, &text)
 }
 
@@ -440,8 +443,10 @@ pub fn merge_dir_package(dir_path: &str) -> Result<BuildValue, String> {
         return Err(format!("[错误] 路径不是目录：{}", dir_path));
     }
 
-    let entries = fs::read_dir(dir)
-        .map_err(|e| format!("[错误] 无法读取目录 '{}': {}", dir_path, e))?;
+    let entries = file_lock::with_file_read(dir, || {
+        fs::read_dir(dir)
+            .map_err(|e| format!("[错误] 无法读取目录 '{}': {}", dir_path, e))
+    })?;
 
     let mut merged = BuildValue::new_empty();
     let mut seen_dic: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -455,8 +460,10 @@ pub fn merge_dir_package(dir_path: &str) -> Result<BuildValue, String> {
         }
         let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
         let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string();
-        let data = fs::read_to_string(&p)
-            .map_err(|e| format!("[错误] 无法读取文件 '{}': {}", fname, e))?;
+        let data = file_lock::with_file_read(&p, || {
+            fs::read_to_string(&p)
+                .map_err(|e| format!("[错误] 无法读取文件 '{}': {}", fname, e))
+        })?;
         let p_str = p.to_string_lossy().to_string();
         let bv = build_dic(&p_str, &data)
             .map_err(|e| format!("[错误] 文件 '{}' 解析失败: {}", fname, e))?;
