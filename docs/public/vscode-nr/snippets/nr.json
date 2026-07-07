@@ -1,0 +1,162 @@
+{
+  "函数定义": {
+    "prefix": "[函数]",
+    "body": ["[函数]$1", "$0"],
+    "description": "定义函数入口"
+  },
+  "内部定义": {
+    "prefix": "[内部]",
+    "body": ["[内部]$1", "$0"],
+    "description": "定义内部回调入口"
+  },
+  "类定义": {
+    "prefix": "[类]",
+    "body": ["[类]$1", "$0"],
+    "description": "定义类入口"
+  },
+  "函数简写": {
+    "prefix": "[f]",
+    "body": ["[f]$1", "$0"],
+    "description": "函数入口简写"
+  },
+  "类简写": {
+    "prefix": "[L]",
+    "body": ["[L]$1", "$0"],
+    "description": "类入口简写"
+  },
+  "类方法": {
+    "prefix": "[f:]",
+    "body": ["[f:${1:ClassName}]$2", "$0"],
+    "description": "定义类方法"
+  },
+  "条件判断": {
+    "prefix": "如果",
+    "body": ["如果:${1:condition}", "\t$2", "如果尾"],
+    "description": "如果-如果尾 条件判断块"
+  },
+  "条件否则": {
+    "prefix": "否则",
+    "body": ["否则", "\t$1"],
+    "description": "条件判断中的否则分支"
+  },
+  "循环块": {
+    "prefix": "循环",
+    "body": ["循环>${1:var}=${2:value}", "\t$3", "<循环"],
+    "description": "循环块"
+  },
+  "跳转": {
+    "prefix": "goto",
+    "body": ["goto ${1:label}", ":${1:label}", "$0"],
+    "description": "goto 跳转到标签"
+  },
+  "标签": {
+    "prefix": ":",
+    "body": [":${1:label}", "$0"],
+    "description": "定义跳转标签"
+  },
+  "终止": {
+    "prefix": ">终止",
+    "body": [">终止"],
+    "description": "终止当前函数执行"
+  },
+  "引入模块": {
+    "prefix": "#引入",
+    "body": ["#引入=@${1:module}", "$0"],
+    "description": "引入外部模块"
+  },
+  "纯文本块": {
+    "prefix": "纯文本>",
+    "body": ["${1|纯文本,文本|}>", "$2", "<文本"],
+    "description": "纯文本输出块"
+  },
+  "代码块": {
+    "prefix": "#{",
+    "body": ["#{", "$1", "}#"],
+    "description": "代码块"
+  },
+  "行注释": {
+    "prefix": "//",
+    "body": ["// $1"],
+    "description": "单行注释"
+  },
+  "块注释": {
+    "prefix": "/*",
+    "body": ["/* $1 */"],
+    "description": "多行块注释"
+  },
+  "变量插值": {
+    "prefix": "%",
+    "body": ["%${1:varName}%"],
+    "description": "变量插值 %var%"
+  },
+  "函数调用": {
+    "prefix": "$f",
+    "body": ["$$${1:funcName} ${2:args}$$"],
+    "description": "函数调用 $func args$"
+  },
+  "字符串打印": {
+    "prefix": "打印",
+    "body": ["$$${1:打印} ${2:args}$$"],
+    "description": "函数调用模板 $funcName args$"
+  },
+  "回调": {
+    "prefix": "回调",
+    "body": ["$$${1:回调} ${2:target}$$"],
+    "description": "回调函数"
+  },
+  "变量定义": {
+    "prefix": "var",
+    "body": ["${1:name}:${2:value}"],
+    "description": "定义变量 name:value"
+  },
+  "变量定义表达式": {
+    "prefix": "varexpr",
+    "body": ["${1:name}::${2:[expression]}"],
+    "description": "定义变量（表达式求值） name::[expr]"
+  },
+  "启动服务器": {
+    "prefix": "启动服务器",
+    "body": ["$启动服务器 ${1:port} ${2:handler}$$"],
+    "description": "启动 HTTP 服务器"
+  },
+  "微秒时间戳": {
+    "prefix": "微秒时间戳",
+    "body": ["%微秒时间戳%"],
+    "description": "获取当前微秒时间戳（内置变量）"
+  },
+  "字符串操作": {
+    "prefix": "s.",
+    "body": ["$s.${1:长度} ${2:args}$$"],
+    "description": "字符串操作函数"
+  },
+  "类型转换": {
+    "prefix": "t.",
+    "body": ["$t.${1:转文本} ${2:value}$$"],
+    "description": "类型转换函数"
+  },
+  "数学操作": {
+    "prefix": "m.",
+    "body": ["$m.${1:绝对值} ${2:args}$$"],
+    "description": "数学运算函数"
+  },
+  "网络访问": {
+    "prefix": "访问.",
+    "body": ["$访问.发送 ${1:url}$$"],
+    "description": "网络访问函数 (@访问 模块)"
+  },
+  "画布操作": {
+    "prefix": "画布",
+    "body": ["$$${1:创建画布} ${2:args}$$"],
+    "description": "画布操作函数"
+  },
+  "画笔操作": {
+    "prefix": "画笔",
+    "body": ["$画笔.设置颜色 ${1:args}$$"],
+    "description": "画笔操作函数"
+  },
+  "绘制操作": {
+    "prefix": "绘制",
+    "body": ["$绘制.线 ${1:args}$$"],
+    "description": "绘制操作函数"
+  }
+}

@@ -1,0 +1,6 @@
+/target
+/dicTest
+node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+*.vsix

@@ -1,0 +1,50 @@
+{
+  "name": "nr-language",
+  "displayName": "NR Language Support",
+  "description": "NR 语言 (Nebula 词库引擎 DSL) 语法高亮与代码补全支持",
+  "version": "1.0.0",
+  "publisher": "nebula",
+  "main": "./extension.js",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Programming Languages"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nebula/nr-language"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "nr",
+        "aliases": ["NR", "nr"],
+        "extensions": [".nr"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "nr",
+        "scopeName": "source.nr",
+        "path": "./syntaxes/nr.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "nr",
+        "path": "./snippets/nr.json"
+      }
+    ],
+    "completions": [
+      {
+        "language": "nr",
+        "items": [
+          { "label": "s.", "detail": "字符串操作 (s.长度, s.截取, ...) — 需 #引入=@字符串", "kind": 8 },
+          { "label": "t.", "detail": "类型转换 (t.转文本, t.转数字, ...) — 需 #引入=@类型", "kind": 8 },
+          { "label": "m.", "detail": "数学运算 (m.绝对值, m.最大值, ...) — 需 #引入=@数学", "kind": 8 },
+          { "label": "访问.", "detail": "HTTP 网络访问 (访问.发送, 访问.内容, ...) — 需 #引入=@访问", "kind": 8 }
+        ]
+      }
+    ]
+  }
+}

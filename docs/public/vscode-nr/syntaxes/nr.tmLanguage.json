@@ -1,0 +1,302 @@
+{
+  "scopeName": "source.nr",
+  "name": "NR",
+  "fileTypes": ["nr"],
+  "patterns": [
+    { "include": "#compiler-directives" },
+    { "include": "#comments" },
+    { "include": "#multiline-strings" },
+    { "include": "#block-syntax" },
+    { "include": "#code-block" },
+    { "include": "#import-statement" },
+    { "include": "#function-call" },
+    { "include": "#special-markers" },
+    { "include": "#async-output" },
+    { "include": "#text-slice" },
+    { "include": "#map-access" },
+    { "include": "#expression" },
+    { "include": "#variable-interpolation" },
+    { "include": "#variable-definition" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#escape-chars" },
+    { "include": "#plain-text" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block",
+          "begin": "/\\*",
+          "end": "\\*/"
+        },
+        {
+          "name": "comment.line",
+          "begin": "//(?!@)",
+          "end": "$"
+        }
+      ]
+    },
+    "compiler-directives": {
+      "name": "comment.block.documentation",
+      "match": "//@.*$"
+    },
+    "multiline-strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double",
+          "begin": "\"\"\"",
+          "end": "\"\"\"",
+          "patterns": [
+            { "include": "#variable-interpolation" }
+          ]
+        },
+        {
+          "name": "string.quoted.single",
+          "begin": "'''",
+          "end": "'''",
+          "patterns": [
+            { "include": "#variable-interpolation" }
+          ]
+        }
+      ]
+    },
+    "block-syntax": {
+      "patterns": [
+        {
+          "name": "markup.raw",
+          "begin": "(纯文本|文本)>",
+          "end": "<文本",
+          "beginCaptures": {
+            "1": { "name": "keyword.control" }
+          },
+          "endCaptures": {
+            "0": { "name": "keyword.control" }
+          },
+          "patterns": [
+            { "include": "#variable-interpolation" }
+          ]
+        }
+      ]
+    },
+    "code-block": {
+      "name": "markup.raw",
+      "begin": "#\\{",
+      "end": "\\}#",
+      "patterns": [
+        { "include": "#variable-interpolation" }
+      ]
+    },
+    "function-call": {
+      "name": "meta.function-call",
+      "begin": "\\$",
+      "end": "\\$",
+      "beginCaptures": {
+        "0": { "name": "punctuation.section.function" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.section.function" }
+      },
+      "patterns": [
+        { "include": "#variable-interpolation" },
+        {
+          "name": "entity.name.function",
+          "match": "[^\\s$%]+"
+        },
+        { "include": "#map-access" },
+        { "include": "#strings" },
+        { "include": "#numbers" }
+      ]
+    },
+    "special-markers": {
+      "patterns": [
+        {
+          "comment": "[函数]name  /  [f]name  /  [函数:Class]name  /  [f:Class]name",
+          "name": "meta.function.definition",
+          "begin": "^\\[((?:函数|f)(?::[^\\]]+)?)\\]",
+          "end": "$",
+          "beginCaptures": {
+            "1": { "name": "storage.type.function" }
+          },
+          "patterns": [
+            {
+              "name": "entity.name.function",
+              "match": "\\S+"
+            }
+          ]
+        },
+        {
+          "comment": "[内部]name",
+          "name": "meta.section.definition",
+          "begin": "^\\[(内部)\\]",
+          "end": "$",
+          "beginCaptures": {
+            "1": { "name": "storage.type" }
+          },
+          "patterns": [
+            {
+              "name": "entity.name.label",
+              "match": "\\S+"
+            }
+          ]
+        },
+        {
+          "comment": "[类]name  /  [L]name  /  [类:Class]name  /  [L:Class]name",
+          "name": "meta.class.definition",
+          "begin": "^\\[((?:类|L)(?::[^\\]]+)?)\\]",
+          "end": "$",
+          "beginCaptures": {
+            "1": { "name": "storage.type.class" }
+          },
+          "patterns": [
+            {
+              "name": "entity.name.class",
+              "match": "\\S+"
+            }
+          ]
+        }
+      ]
+    },
+    "async-output": {
+      "name": "keyword.operator",
+      "match": "#:"
+    },
+    "import-statement": {
+      "comment": "#引入=@module 或 #引入=name",
+      "patterns": [
+        {
+          "name": "meta.import",
+          "match": "(#引入=)(@?\\S+)",
+          "captures": {
+            "1": { "name": "keyword.control.import" },
+            "2": { "name": "entity.name.namespace" }
+          }
+        }
+      ]
+    },
+    "text-slice": {
+      "comment": "快捷解析 @var[start:end:step] 切片语法",
+      "patterns": [
+        {
+          "name": "meta.text-slice",
+          "match": "(@)(\\w+)\\s*(\\[)\\s*(-?\\d*)\\s*(:)\\s*(-?\\d*)\\s*(?::\\s*(-?\\d*)\\s*)?(\\])",
+          "captures": {
+            "1": { "name": "punctuation.definition.annotation" },
+            "2": { "name": "variable" },
+            "3": { "name": "punctuation.section.brackets.begin" },
+            "4": { "name": "constant.numeric" },
+            "5": { "name": "keyword.operator.slice" },
+            "6": { "name": "constant.numeric" },
+            "7": { "name": "keyword.operator.slice" },
+            "8": { "name": "constant.numeric" },
+            "9": { "name": "punctuation.section.brackets.end" }
+          }
+        }
+      ]
+    },
+    "map-access": {
+      "comment": "@var[key] 映射访问",
+      "patterns": [
+        {
+          "name": "meta.map-access",
+          "begin": "@",
+          "end": "(?=[\\s$\\]},;:]|$)",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.annotation" }
+          },
+          "patterns": [
+            { "include": "#expression" },
+            { "include": "#variable-interpolation" },
+            {
+              "name": "variable.other.object",
+              "match": "[^\\[\\]@\\s]+"
+            }
+          ]
+        }
+      ]
+    },
+    "expression": {
+      "name": "meta.expression",
+      "begin": "\\[(?!\\s*\\])(?!(?:函数|f|内部|类|L)(?:\\]|:))",
+      "end": "\\]",
+      "patterns": [
+        { "include": "#variable-interpolation" },
+        { "include": "#map-access" },
+        { "include": "#strings" },
+        { "include": "#numbers" },
+        {
+          "name": "keyword.operator",
+          "match": "[+\\-*/%<>=!&|~^]+"
+        }
+      ]
+    },
+    "variable-interpolation": {
+      "name": "variable",
+      "match": "%[^%]+%"
+    },
+    "variable-definition": {
+      "patterns": [
+        {
+          "comment": "name::value 表达式赋值，后面文本为字符串颜色",
+          "name": "meta.definition.variable",
+          "match": "^\\s*(\\w+)\\s*(::)\\s*(.+)$",
+          "captures": {
+            "1": { "name": "variable" },
+            "2": { "name": "keyword.operator.assignment" },
+            "3": { "name": "string.unquoted" }
+          }
+        },
+        {
+          "comment": "name:value 普通赋值，后面文本为字符串颜色",
+          "name": "meta.definition.variable",
+          "match": "^\\s*(\\w+)\\s*(:)\\s*(.+)$",
+          "captures": {
+            "1": { "name": "variable" },
+            "2": { "name": "keyword.operator.assignment" },
+            "3": { "name": "string.unquoted" }
+          }
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "include": "#variable-interpolation" },
+            {
+              "name": "constant.character.escape",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            { "include": "#variable-interpolation" },
+            {
+              "name": "constant.character.escape",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "name": "constant.numeric",
+      "match": "\\b\\d+(\\.\\d+)?\\b"
+    },
+    "escape-chars": {
+      "name": "constant.character.escape",
+      "match": "(?<!\\\\)\\\\[rn]"
+    },
+    "plain-text": {
+      "name": "string.unquoted",
+      "match": "[^\\s]+"
+    }
+  }
+}

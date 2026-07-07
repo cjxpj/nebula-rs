@@ -1,0 +1,32 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "cargo",
+			"command": "build",
+			"args": ["--release"],
+			"problemMatcher": ["$rustc"],
+			"group": "build",
+			"label": "cargo build --release"
+		},
+		{
+			"type": "shell",
+			"command": "upx --best --lzma nebula.exe",
+			"options": {
+				"cwd": "${workspaceFolder}/target/release"
+			},
+			"problemMatcher": [],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"label": "upx compress",
+			"presentation": {
+				"echo": true,
+				"reveal": "always"
+			},
+			"dependsOn": ["cargo build --release"],
+			"dependsOrder": "sequence"
+		}
+	]
+}
