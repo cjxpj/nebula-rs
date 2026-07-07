@@ -19,7 +19,7 @@ function onKeydown(e) {
 <template>
   <div class="app" @keydown="onKeydown">
     <header class="header">
-      <a class="logo" href="#/">NR 语言参考手册</a>
+      <a class="logo" href="#/">NR 语言参考手册？</a>
       <VersionSwitcher />
       <div class="header-spacer"></div>
       <button class="icon-btn" @click="showSearch = true" title="搜索 (Ctrl+K)">
