@@ -2,7 +2,7 @@
   <div class="home">
     <section class="hero">
       <h1 class="hero-name">NR 语言</h1>
-      <p class="hero-text">参考手册</p>
+      <p class="hero-text">参考手册 sscs</p>
       <p class="hero-tagline">Nebula 词库引擎的领域特定语言</p>
       <a class="hero-btn" href="#/v1.0/">开始阅读</a>
     </section>

@@ -1,10 +1,13 @@
 import { execSync } from 'child_process';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const vscodeDir = path.resolve(__dirname, 'public', 'vscode-nr');
+const licenseSrc = path.resolve(__dirname, '..', 'LICENSE');
+const licenseDst = path.resolve(vscodeDir, 'LICENSE');
 
 /**
  * Vite 插件：dev / build 时自动将 public/vscode-nr/ 打包为 .vsix
@@ -17,6 +20,11 @@ export function vsixPackager() {
         done = true;
 
         console.log('\n[vsix-packager] 正在打包 VS Code 扩展...');
+
+        // 自动复制 LICENSE 避免 vsce 警告
+        if (fs.existsSync(licenseSrc) && !fs.existsSync(licenseDst)) {
+            fs.copyFileSync(licenseSrc, licenseDst);
+        }
 
         try {
             execSync('npx @vscode/vsce package --out .', {

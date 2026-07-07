@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "deploy": "vite build && echo y| gh-pages -d dist"
+    "deploy": "vite build && copy ..\\LICENSE dist\\ && gh-pages -d dist"
   },
   "dependencies": {
     "marked": "^14.1.0",
