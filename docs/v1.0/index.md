@@ -47,6 +47,6 @@ NR 是 Nebula 词库引擎的领域特定语言（DSL），扩展名为 `.nr`，
 
 ## 工具
 
-- **VS Code 语法高亮扩展**：为 `.nr` 文件提供语法高亮、注释切换、括号匹配等支持。<a href="../vscode-nr/nr-language-1.0.0.vsix">点击下载 .vsix</a>
+- **VS Code 语法高亮扩展**：为 `.nr` 文件提供语法高亮、注释切换、括号匹配等支持。<a href="./vscode-nr/nr-language-1.0.0.vsix">点击下载 .vsix</a>
 
 安装方法：VS Code 中按 `Ctrl+Shift+P`，输入 "Extensions: Install from VSIX..."，选择下载的文件即可。也可以将 `vscode-nr` 文件夹复制到 `%USERPROFILE%\.vscode\extensions\` 目录下。

@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const vscodeDir = path.resolve(__dirname, '..', 'public', 'vscode-nr');
+const vscodeDir = path.resolve(__dirname, 'public', 'vscode-nr');
 
 /**
  * Vite 插件：dev / build 时自动将 public/vscode-nr/ 打包为 .vsix
