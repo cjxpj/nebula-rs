@@ -332,13 +332,8 @@ fn parse_loop_block(lines: &[String], idx: usize, stmts: &mut Vec<Stmt>, line_of
         // 条件循环：整个 inner 作为条件表达式，预编译 Token
         let tokens = IfText::parse_tokens(inner);
         ("_".to_string(), None, Some(parse_expr(inner).unwrap_or(Expr::Lit(Value::Str(inner.to_string())))), Some(tokens))
-    } else if let Some(eq_pos) = inner.find('=') {
-        let var = inner[..eq_pos].to_string();
-        let count_str = inner[eq_pos + 1..].to_string();
-        let expr = parse_expr(&count_str).unwrap_or(Expr::Lit(Value::Str(count_str)));
-        (var, Some(expr), None, None)
     } else {
-        (inner.to_string(), None, None, None) // 无限循环
+        (inner.to_string(), None, None, None) // 无限循环 / 参数循环
     };
 
     // 收集循环体直到 <循环
@@ -2672,6 +2667,11 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
         };
         sub_ctx.sys.line_offset = func_line;
         sub_ctx.sys.source_file = ctx.sys.source_file.clone();
+
+        // 注入父上下文的 head 变量（#引入=path 直接合并场景）
+        for (key, val) in ctx.val.p.obj.iter() {
+            sub_ctx.val.p.set_string(key, val.display());
+        }
 
         // 加载实例变量：
         // 1) ClassName.field → .field（从父上下文加载）

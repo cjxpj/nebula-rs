@@ -234,7 +234,7 @@ pub fn canvas_new(args: &[String]) -> Result<String, String> {
         }
         let bg = args.get(3)
             .and_then(|s| parse_color(s))
-            .unwrap_or([0, 0, 0, 255]);
+            .unwrap_or([255, 255, 255, 255]);
         CanvasData::new(w as u32, h as u32, bg)
     } else if let Some(data) = args.get(1) {
         // base64 图片解码

@@ -1529,11 +1529,13 @@ fn trim_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Stri
     Some(ctx.val.text(&value).trim().to_string())
 }
 
-/// $判断数字 文本$ — 判断是否为数字，返回 1/0
+/// $判断数字 文本$ — 判断是否为非负整数，返回 1/0（小数、负数返回 0）
 fn is_number_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let value = args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
     let text = ctx.val.text(&value);
-    Some(if text.trim().parse::<f64>().is_ok() { "1" } else { "0" }.to_string())
+    let trimmed = text.trim();
+    let result = !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit());
+    Some(if result { "1" } else { "0" }.to_string())
 }
 
 // ===== 大小写转换 =====
@@ -1554,7 +1556,7 @@ fn lower_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Str
 
 // ===== 查找与统计 =====
 
-/// $查找 字符串 子串$ — 查找子串位置（0-based），找不到返回空，对标 Python str.find()
+/// $查找 字符串 子串$ — 查找子串位置（0-based），找不到返回 "-1"，对标 Python str.find()
 fn find_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let sub = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
@@ -1563,8 +1565,9 @@ fn find_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Stri
         .unwrap_or(0);
     if start < s.len() {
         s[start..].find(&sub).map(|pos| (start + pos).to_string())
+            .or_else(|| Some("-1".to_string()))
     } else {
-        None
+        Some("-1".to_string())
     }
 }
 
@@ -1660,10 +1663,10 @@ fn repeat_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
 
 // ==================== 字符串判断函数 ====================
 
-/// Python str.isalpha()
+/// 判断是否全为 ASCII 字母 (A-Z a-z)，非空
 fn is_alpha_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let s = ctx.val.text(&args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
-    let result = s.chars().any(|c| c.is_alphabetic()) && s.chars().all(|c| c.is_alphabetic());
+    let result = !s.is_empty() && s.chars().all(|c| c.is_ascii_alphabetic());
     Some(if result { "1".to_string() } else { String::new() })
 }
 
@@ -1683,10 +1686,10 @@ fn is_upper_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<
     Some(if has_cased && all_upper { "1".to_string() } else { String::new() })
 }
 
-/// Python str.isspace()
+/// Python str.isspace() — 空字符串返回 "1"
 fn is_space_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let s = ctx.val.text(&args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
-    let result = !s.is_empty() && s.chars().all(|c| c.is_whitespace());
+    let result = s.is_empty() || s.chars().all(|c| c.is_whitespace());
     Some(if result { "1".to_string() } else { String::new() })
 }
 
@@ -2573,7 +2576,7 @@ fn download_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
     let url = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let save_path = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
     if url.is_empty() || save_path.is_empty() {
-        return Some("false".to_string());
+        return Some(String::new());
     }
     if let Some(parent) = std::path::Path::new(&save_path).parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -2598,7 +2601,7 @@ fn download_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
         Ok(()) => Some("true".to_string()),
         Err(e) => {
             eprintln!("[Nebula] {}", e);
-            Some("false".to_string())
+            Some(String::new())
         }
     }
 }

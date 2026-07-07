@@ -85,8 +85,6 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
 
     let mut packages: HashMap<String, BuildValue> = HashMap::new();
 
-    let mut f_header_name = String::new();
-
     // 命名去重（各分类独立）
     let mut seen_dic: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut seen_static: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -121,9 +119,6 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
                 "//@关闭缩进" => suojin = true,
                 "//@启用缩进" => suojin = false,
                 _ => {}
-            }
-            if line.len() > 13 && line.starts_with("//@函数头=") {
-                f_header_name = line[13..].to_string();
             }
             continue;
         }
@@ -201,17 +196,47 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
                         packages.insert(module.to_string(), z);
                         runheadtext.push(line);
                     } else {
-                        // #引入=path —— 直接合并（兼容旧语法）
+                        // #引入=path —— 直接合并（兼容旧语法），合并所有词条并检测冲突
                         runheadtext.push(line);
-                        func_text.extend(z.local_static);
-                        if !f_header_name.is_empty() {
-                            for mut item in z.local_func {
-                                item.trigger = format!("{}.{}", f_header_name, item.trigger);
-                                chajian_text.push(item);
-                            }
-                        } else {
-                            chajian_text.extend(z.local_func);
+                        // 合并被引入文件的 head（变量初始化）
+                        for h in &z.head {
+                            runheadtext.push(h.clone());
                         }
+
+                        // 合并 packages
+                        for (k, v) in z.packages {
+                            if packages.contains_key(&k) {
+                                return Err(format!("[错误] {} 第{}行: 引入合并时包名 '{}' 冲突", _dic_path, dic_i + 1, k));
+                            }
+                            packages.insert(k, v);
+                        }
+
+                        // 检测并合并 dic
+                        for item in &z.dic {
+                            if seen_dic.contains(&item.trigger) {
+                                return Err(format!("[错误] {} 第{}行: 引入合并时词条 '{}' 冲突", _dic_path, dic_i + 1, item.trigger));
+                            }
+                            seen_dic.insert(item.trigger.clone());
+                        }
+                        dic_text.extend(z.dic);
+
+                        // 检测并合并 local_static
+                        for item in &z.local_static {
+                            if seen_static.contains(&item.trigger) {
+                                return Err(format!("[错误] {} 第{}行: 引入合并时 [内部] '{}' 冲突", _dic_path, dic_i + 1, item.trigger));
+                            }
+                            seen_static.insert(item.trigger.clone());
+                        }
+                        func_text.extend(z.local_static);
+
+                        // 检测并合并 local_func
+                        for item in &z.local_func {
+                            if seen_func.contains(&item.trigger) {
+                                return Err(format!("[错误] {} 第{}行: 引入合并时 [函数] '{}' 冲突", _dic_path, dic_i + 1, item.trigger));
+                            }
+                            seen_func.insert(item.trigger.clone());
+                        }
+                        chajian_text.extend(z.local_func);
                     }
                 } else {
                     return Err(format!("[错误] {} 第{}行: 引入目标不存在：{}（#引入={}）", _dic_path, dic_i + 1, path, path));
@@ -269,11 +294,7 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
                           || line.starts_with("[f]") && line.len() > 3
                 {
                     chajian = true;
-                    if !f_header_name.is_empty() {
-                        dic_trigger = format!("{}{}", f_header_name, &line[3..]);
-                    } else {
-                        dic_trigger = line[3..].to_string();
-                    }
+                    dic_trigger = line[3..].to_string();
                 } else if line.starts_with("[内部]") && line.len() > 8 {
                     neibu = true;
                     dic_trigger = line[8..].to_string();
@@ -301,11 +322,7 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
                     }
                 } else if line.starts_with("[函数]") && line.len() > 8 {
                     chajian = true;
-                    if !f_header_name.is_empty() {
-                        dic_trigger = format!("{}{}", f_header_name, &line[8..]);
-                    } else {
-                        dic_trigger = line[8..].to_string();
-                    }
+                    dic_trigger = line[8..].to_string();
                 }
 
                 // 函数名合法性校验：禁止特殊字符
