@@ -64,15 +64,10 @@ fn format_f64(v: f64) -> String {
 /// 在 .nr 文件头部声明引入，函数仅在使用 `#引入=` 导入后才生效：
 ///
 /// ```nr
-/// a:#引入=@字符串
-/// b:#引入=@数学
-/// c:#引入=@访问
-/// ```
-///
-/// 引入后通过 OOP 调用：
-///
-/// ```nr
-/// $a.大写 hello$
+/// #引入=@字符串      ← 不赋变量名，函数直接全局可用：$大写 hello$
+/// #引入=@数学        ← 不赋变量名，函数直接全局可用：$绝对值 -5$
+/// a:#引入=@访问      ← 赋变量名（有状态），调用：$a.新建 url$
+/// b:#引入=@画布      ← 赋变量名（有状态），调用：$b.创建画布 100 100$
 /// ```
 ///
 /// # 模块列表
@@ -84,6 +79,8 @@ fn format_f64(v: f64) -> String {
 /// | `@数学` | 绝对值, 最大值, 最小值, 取整, 幂运算, 求和, 向上取整, 向下取整 |
 /// | `@类型` | 转文本, 转数字, 转整数, 转浮点 |
 /// | `@访问` | 新建, 切换GET, 切换POST, POST, POST文件, 启用跳转, 禁用跳转, 设置头部, 设置超时, 发送, 全部内容, 内容 |
+/// | `@画布` | 创建画布, 画布.获取, 画笔.设置颜色, ... 等 30 个函数 |
+/// | `@文件` | 写文件, 读文件, 写, 读, 删除文件, 删除文件夹, 存在文件, 存在文件夹, 存在文件或文件夹, 文件后缀, 读文件行, 文件夹列表, 文件列表, 随机文件夹名, 随机文件名, 文件夹大小, 文件大小, 重命名, 复制粘贴, 下载文件 |
 pub struct StdLib;
 
 impl StdLib {
@@ -177,6 +174,28 @@ impl StdLib {
                 ("画布.旋转", canvas_rotate_fn as BuiltinFn),
                 ("画布.圆形", canvas_round_corners_fn as BuiltinFn),
             ],
+            "文件" => vec![
+                ("写文件", write_string_file_fn as BuiltinFn),
+                ("读文件", read_string_file_fn as BuiltinFn),
+                ("写", write_key_string_file_fn as BuiltinFn),
+                ("读", read_key_string_file_fn as BuiltinFn),
+                ("删除文件", delete_file_fn as BuiltinFn),
+                ("删除文件夹", delete_dir_fn as BuiltinFn),
+                ("存在文件", file_exist_fn as BuiltinFn),
+                ("存在文件夹", dir_exist_fn as BuiltinFn),
+                ("存在文件或文件夹", file_or_dir_exist_fn as BuiltinFn),
+                ("文件后缀", file_suffix_fn as BuiltinFn),
+                ("读文件行", read_file_lines_fn as BuiltinFn),
+                ("文件夹列表", dir_list_fn as BuiltinFn),
+                ("文件列表", file_list_fn as BuiltinFn),
+                ("随机文件夹名", random_dir_name_fn as BuiltinFn),
+                ("随机文件名", random_file_name_fn as BuiltinFn),
+                ("文件夹大小", dir_size_fn as BuiltinFn),
+                ("文件大小", file_size_fn as BuiltinFn),
+                ("重命名", file_rename_fn as BuiltinFn),
+                ("复制粘贴", file_copy_fn as BuiltinFn),
+                ("下载文件", download_file_fn as BuiltinFn),
+            ],
             _ => return None,
         };
         Some(funcs)
@@ -235,30 +254,6 @@ pub fn register_builtins(ctx: &mut DicContext) {
     builtins.insert("访问".to_string(), access_get_fn);
     builtins.insert("访问POST".to_string(), access_post_fn);
     builtins.insert("访问转发".to_string(), request_forward_fn);
-    // ===== 文件读写 =====
-    builtins.insert("写文件".to_string(), write_string_file_fn);
-    builtins.insert("读文件".to_string(), read_string_file_fn);
-    builtins.insert("写".to_string(), write_key_string_file_fn);
-    builtins.insert("读".to_string(), read_key_string_file_fn);
-    // ===== 更多文件操作 =====
-    builtins.insert("删除文件".to_string(), delete_file_fn);
-    builtins.insert("删除文件夹".to_string(), delete_dir_fn);
-    builtins.insert("存在文件".to_string(), file_exist_fn);
-    builtins.insert("存在文件夹".to_string(), dir_exist_fn);
-    builtins.insert("存在文件或文件夹".to_string(), file_or_dir_exist_fn);
-    builtins.insert("文件后缀".to_string(), file_suffix_fn);
-    builtins.insert("读文件.随机一行".to_string(), read_file_random_line_fn);
-    builtins.insert("读文件行".to_string(), read_file_lines_fn);
-    builtins.insert("读文件.行数".to_string(), read_file_lines_count_fn);
-    builtins.insert("文件夹列表".to_string(), dir_list_fn);
-    builtins.insert("文件列表".to_string(), file_list_fn);
-    builtins.insert("随机文件夹名".to_string(), random_dir_name_fn);
-    builtins.insert("随机文件名".to_string(), random_file_name_fn);
-    builtins.insert("文件夹大小".to_string(), dir_size_fn);
-    builtins.insert("文件大小".to_string(), file_size_fn);
-    builtins.insert("重命名".to_string(), file_rename_fn);
-    builtins.insert("复制粘贴".to_string(), file_copy_fn);
-    builtins.insert("下载文件".to_string(), download_file_fn);
 }
 
 /// new 类名$ — 创建面对像实例，返回类名
@@ -2423,20 +2418,6 @@ fn simple_rand(max: usize) -> usize {
     (x as usize) % max
 }
 
-/// $读文件.随机一行 路径 [默认值]$ — 从文件随机读取一行（对标 Go readStringFileRandomLine）
-fn read_file_random_line_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let default = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
-    let path_buf = std::path::PathBuf::from(&path);
-    let content = match file_lock::with_file_read(&path_buf, || std::fs::read_to_string(&path)) {
-        Ok(s) => s,
-        Err(_) => return Some(default),
-    };
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.is_empty() { return Some(default); }
-    let idx = simple_rand(lines.len());
-    Some(lines[idx].to_string())
-}
 
 /// $读文件行 路径 起始行 数量 [默认值]$ — 从起始行开始读取指定数量的行，返回 JSON 数组
 /// 起始行和数量均为 1-based（对标 Go readStringFileLines）
@@ -2458,18 +2439,6 @@ fn read_file_lines_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> 
         .map(|s| serde_json::Value::String(s.to_string()))
         .collect();
     Some(serde_json::Value::Array(selected).to_string())
-}
-
-/// $读文件.行数 路径 [默认值]$ — 统计文件总行数（对标 Go readStringFileLinesCount）
-fn read_file_lines_count_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let default = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
-    let path_buf = std::path::PathBuf::from(&path);
-    let content = match file_lock::with_file_read(&path_buf, || std::fs::read_to_string(&path)) {
-        Ok(s) => s,
-        Err(_) => return Some(default),
-    };
-    Some(content.lines().count().to_string())
 }
 
 /// $文件夹列表 [路径]$ — 列出目录下的文件夹名，返回 JSON 数组（对标 Go dirList）

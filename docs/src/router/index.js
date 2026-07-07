@@ -9,5 +9,8 @@ export default createRouter({
     { path: '/v1.0', redirect: '/v1.0/' },
     { path: '/v1.0/', component: MarkdownPage },
     { path: '/v1.0/:page', component: MarkdownPage }
-  ]
+  ],
+  scrollBehavior() {
+    return { top: 0 }
+  }
 })
