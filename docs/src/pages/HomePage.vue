@@ -24,7 +24,7 @@
 
     <section class="tools">
       <h2>工具</h2>
-      <p><a href="./vscode-nr/nr-language-1.0.0.vsix">下载 VS Code 语法高亮扩展 (.vsix)</a></p>
+      <p><a href="./vscode-nr/nr-language-0.1.0.vsix">下载 VS Code 语法高亮扩展 (.vsix)</a></p>
       <p>安装：VS Code → <code>Ctrl+Shift+P</code> → "Install from VSIX..." → 选择下载的文件</p>
       <p class="vsix-notice">注意：此插件仅提供最新版本，不保证历史版本兼容。</p>
     </section>

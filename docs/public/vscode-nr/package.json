@@ -2,7 +2,7 @@
   "name": "nr-language",
   "displayName": "NR Language Support",
   "description": "NR 语言 (Nebula 词库引擎 DSL) 语法高亮与代码补全支持",
-  "version": "1.0.1",
+  "version": "0.1.0",
   "publisher": "nebula",
   "icon": "icon.png",
   "main": "./extension.js",
