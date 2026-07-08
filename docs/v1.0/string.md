@@ -1,11 +1,13 @@
-# 11.7 @字符串
+# @字符串
 
 导入：`#引入=@字符串`（不赋变量名，函数全局可用）| 共 22 个函数。提供长度、分割、大小写转换、对齐、判断等全面的字符串操作。`$截取$`、`$替换$`、`$删前缀$`、`$删后缀$` 属于基础函数，无需导入。
+
+<a id="string-substr"></a>
 
 ### `$截取$` — 截取子串 <span class="badge">基础</span>
 
 <dl>
-  <dt>签名</dt><dd><code>$截取 [字符串] [开始] [长度]$</code></dd>
+  <dt>格式</dt><dd><code>$截取 [字符串] [开始] [长度]$</code></dd>
   <dt>参数</dt><dd>字符串、起始索引（从 0 开始）、可选的长度</dd>
   <dt>返回值</dt><dd>截取的子串</dd>
 </dl>
@@ -17,10 +19,12 @@ $截取 hello 1 3$   → "ell"
 $截取 你好世界 2$    → "世界"
 ```
 
+<a id="string-replace"></a>
+
 ### `$替换$` — 替换子串 <span class="badge">基础</span>
 
 <dl>
-  <dt>签名</dt><dd><code>$替换 [字符串] [旧] [新]$</code></dd>
+  <dt>格式</dt><dd><code>$替换 [字符串] [旧] [新]$</code></dd>
   <dt>参数</dt><dd>源字符串、要替换的旧子串、新子串</dd>
   <dt>返回值</dt><dd>替换后的字符串</dd>
 </dl>
@@ -31,10 +35,12 @@ $截取 你好世界 2$    → "世界"
 $替换 hello world o x$   → "hellx wxrld"
 ```
 
+<a id="string-trim-prefix"></a>
+
 ### `$删前缀$` — 删除前缀 <span class="badge">基础</span>
 
 <dl>
-  <dt>签名</dt><dd><code>$删前缀 [字符串] [前缀]$</code></dd>
+  <dt>格式</dt><dd><code>$删前缀 [字符串] [前缀]$</code></dd>
   <dt>参数</dt><dd>源字符串、要删除的前缀</dd>
   <dt>返回值</dt><dd>删除前缀后的字符串；不匹配则返回原字符串</dd>
 </dl>
@@ -43,10 +49,12 @@ $替换 hello world o x$   → "hellx wxrld"
 $删前缀 https://example.com https://$   → "example.com"
 ```
 
+<a id="string-trim-suffix"></a>
+
 ### `$删后缀$` — 删除后缀 <span class="badge">基础</span>
 
 <dl>
-  <dt>签名</dt><dd><code>$删后缀 [字符串] [后缀]$</code></dd>
+  <dt>格式</dt><dd><code>$删后缀 [字符串] [后缀]$</code></dd>
   <dt>参数</dt><dd>源字符串、要删除的后缀</dd>
   <dt>返回值</dt><dd>删除后缀后的字符串；不匹配则返回原字符串</dd>
 </dl>
@@ -55,10 +63,12 @@ $删前缀 https://example.com https://$   → "example.com"
 $删后缀 file.txt .txt$   → "file"
 ```
 
+<a id="string-len"></a>
+
 ### `$长度$` — 获取字符串长度
 
 <dl>
-  <dt>签名</dt><dd><code>$长度 [字符串]$</code></dd>
+  <dt>格式</dt><dd><code>$长度 [字符串]$</code></dd>
   <dt>参数</dt><dd>一个字符串</dd>
   <dt>返回值</dt><dd>字符数（非字节数）</dd>
 </dl>
@@ -70,10 +80,12 @@ $长度 hello$        → "5"
 $长度 你好世界$      → "4"
 ```
 
+<a id="string-contains"></a>
+
 ### `$文本包含$` — 判断是否包含子串
 
 <dl>
-  <dt>签名</dt><dd><code>$文本包含 [字符串] [子串]$</code></dd>
+  <dt>格式</dt><dd><code>$文本包含 [字符串] [子串]$</code></dd>
   <dt>参数</dt><dd>源字符串、要查找的子串</dd>
   <dt>返回值</dt><dd>"1"（包含）或 "0"（不包含）</dd>
 </dl>
@@ -85,10 +97,12 @@ $文本包含 hello ll$    → "1"
 $文本包含 hello xy$    → "0"
 ```
 
+<a id="string-split"></a>
+
 ### `$文本分割$` — 按分隔符切分取索引
 
 <dl>
-  <dt>签名</dt><dd><code>$文本分割 [字符串] [分隔符] [索引]$</code></dd>
+  <dt>格式</dt><dd><code>$文本分割 [字符串] [分隔符] [索引]$</code></dd>
   <dt>参数</dt><dd>源字符串、分隔符、索引（从 0 开始）</dd>
   <dt>返回值</dt><dd>指定索引位置的元素；索引越界返回空字符串</dd>
 </dl>
@@ -99,10 +113,12 @@ $文本包含 hello xy$    → "0"
 $文本分割 a,b,c , 0$   → "a"
 ```
 
+<a id="string-trim"></a>
+
 ### `$头尾去空$` — 去除首尾空白
 
 <dl>
-  <dt>签名</dt><dd><code>$头尾去空 [文本]$</code></dd>
+  <dt>格式</dt><dd><code>$头尾去空 [文本]$</code></dd>
   <dt>参数</dt><dd>一个字符串</dd>
   <dt>返回值</dt><dd>去除首尾空白后的字符串</dd>
 </dl>
@@ -113,10 +129,12 @@ $文本分割 a,b,c , 0$   → "a"
 $头尾去空 \ \ hello\ \ $   → "hello"
 ```
 
+<a id="string-is-digit"></a>
+
 ### `$判断数字$` — 判断是否全为数字
 
 <dl>
-  <dt>签名</dt><dd><code>$判断数字 [字符串]$</code></dd>
+  <dt>格式</dt><dd><code>$判断数字 [字符串]$</code></dd>
   <dt>参数</dt><dd>一个字符串</dd>
   <dt>返回值</dt><dd>"1"（全为数字）或 "0"（否则）</dd>
 </dl>
@@ -128,10 +146,12 @@ $判断数字 123$       → "1"
 $判断数字 hello$     → "0"
 ```
 
+<a id="string-upper"></a>
+
 ### `$大写$` — 转大写
 
 <dl>
-  <dt>签名</dt><dd><code>$大写 [字符串]$</code></dd>
+  <dt>格式</dt><dd><code>$大写 [字符串]$</code></dd>
   <dt>参数</dt><dd>一个字符串</dd>
   <dt>返回值</dt><dd>所有小写字母转为大写后的字符串</dd>
 </dl>
@@ -142,10 +162,12 @@ $判断数字 hello$     → "0"
 $大写 hello$         → "HELLO"
 ```
 
+<a id="string-lower"></a>
+
 ### `$小写$` — 转小写
 
 <dl>
-  <dt>签名</dt><dd><code>$小写 [字符串]$</code></dd>
+  <dt>格式</dt><dd><code>$小写 [字符串]$</code></dd>
   <dt>参数</dt><dd>一个字符串</dd>
   <dt>返回值</dt><dd>所有大写字母转为小写后的字符串</dd>
 </dl>
@@ -156,10 +178,12 @@ $大写 hello$         → "HELLO"
 $小写 HELLO$         → "hello"
 ```
 
+<a id="string-title"></a>
+
 ### `$首字母大写$` — 首字母大写
 
 <dl>
-  <dt>签名</dt><dd><code>$首字母大写 [字符串]$</code></dd>
+  <dt>格式</dt><dd><code>$首字母大写 [字符串]$</code></dd>
   <dt>参数</dt><dd>一个字符串</dd>
   <dt>返回值</dt><dd>每个单词首字母大写后的字符串</dd>
 </dl>
@@ -170,10 +194,12 @@ $小写 HELLO$         → "hello"
 $首字母大写 hello world$   → "Hello World"
 ```
 
+<a id="string-swapcase"></a>
+
 ### `$大小写互换$` — 大小写互换
 
 <dl>
-  <dt>签名</dt><dd><code>$大小写互换 [字符串]$</code></dd>
+  <dt>格式</dt><dd><code>$大小写互换 [字符串]$</code></dd>
   <dt>参数</dt><dd>一个字符串</dd>
   <dt>返回值</dt><dd>大小写互换后的字符串</dd>
 </dl>
@@ -184,10 +210,12 @@ $首字母大写 hello world$   → "Hello World"
 $大小写互换 Hello$         → "hELLO"
 ```
 
+<a id="string-find"></a>
+
 ### `$查找$` — 查找子串位置
 
 <dl>
-  <dt>签名</dt><dd><code>$查找 [字符串] [子串] [起始位置]$</code></dd>
+  <dt>格式</dt><dd><code>$查找 [字符串] [子串] [起始位置]$</code></dd>
   <dt>参数</dt><dd>源字符串、要查找的子串、可选的起始位置（默认 0）</dd>
   <dt>返回值</dt><dd>首次出现的索引（从 0 开始）；未找到返回 "-1"</dd>
 </dl>
@@ -199,10 +227,12 @@ $查找 hello e$       → "1"
 $查找 hello l 3$     → "3"
 ```
 
+<a id="string-count"></a>
+
 ### `$计数$` — 统计子串出现次数
 
 <dl>
-  <dt>签名</dt><dd><code>$计数 [字符串] [子串]$</code></dd>
+  <dt>格式</dt><dd><code>$计数 [字符串] [子串]$</code></dd>
   <dt>参数</dt><dd>源字符串、要统计的子串</dd>
   <dt>返回值</dt><dd>不重叠出现次数</dd>
 </dl>
@@ -213,10 +243,12 @@ $查找 hello l 3$     → "3"
 $计数 hello l$       → "2"
 ```
 
+<a id="string-starts-with"></a>
+
 ### `$开头判断$` — 判断是否以某子串开头
 
 <dl>
-  <dt>签名</dt><dd><code>$开头判断 [字符串] [前缀]$</code></dd>
+  <dt>格式</dt><dd><code>$开头判断 [字符串] [前缀]$</code></dd>
   <dt>参数</dt><dd>源字符串、要判断的前缀</dd>
   <dt>返回值</dt><dd>"1"（是）或 "0"（否）</dd>
 </dl>
@@ -225,10 +257,12 @@ $计数 hello l$       → "2"
 $开头判断 https://example.com https$    → "1"
 ```
 
+<a id="string-ends-with"></a>
+
 ### `$结尾判断$` — 判断是否以某子串结尾
 
 <dl>
-  <dt>签名</dt><dd><code>$结尾判断 [字符串] [后缀]$</code></dd>
+  <dt>格式</dt><dd><code>$结尾判断 [字符串] [后缀]$</code></dd>
   <dt>参数</dt><dd>源字符串、要判断的后缀</dd>
   <dt>返回值</dt><dd>"1"（是）或 "0"（否）</dd>
 </dl>
@@ -237,10 +271,12 @@ $开头判断 https://example.com https$    → "1"
 $结尾判断 file.txt .txt$    → "1"
 ```
 
+<a id="string-join"></a>
+
 ### `$文本连接$` — 用分隔符连接多个文本
 
 <dl>
-  <dt>签名</dt><dd><code>$文本连接 [分隔符] [文本1] [文本2] [...]$</code></dd>
+  <dt>格式</dt><dd><code>$文本连接 [分隔符] [文本1] [文本2] [...]$</code></dd>
   <dt>参数</dt><dd>分隔符、至少两个文本片段</dd>
   <dt>返回值</dt><dd>用分隔符连接后的字符串</dd>
 </dl>
@@ -251,10 +287,12 @@ $结尾判断 file.txt .txt$    → "1"
 $文本连接 , a b c$           → "a,b,c"
 ```
 
+<a id="string-repeat"></a>
+
 ### `$文本重复$` — 重复文本
 
 <dl>
-  <dt>签名</dt><dd><code>$文本重复 [文本] [次数]$</code></dd>
+  <dt>格式</dt><dd><code>$文本重复 [文本] [次数]$</code></dd>
   <dt>参数</dt><dd>要重复的文本、重复次数</dd>
   <dt>返回值</dt><dd>重复拼接后的字符串</dd>
 </dl>
@@ -265,10 +303,12 @@ $文本连接 , a b c$           → "a,b,c"
 $文本重复 ab 3$      → "ababab"
 ```
 
+<a id="string-is-alpha"></a>
+
 ### `$判断字母$` — 判断是否全为字母
 
 <dl>
-  <dt>签名</dt><dd><code>$判断字母 [字符串]$</code></dd>
+  <dt>格式</dt><dd><code>$判断字母 [字符串]$</code></dd>
   <dt>参数</dt><dd>一个字符串</dd>
   <dt>返回值</dt><dd>"1"（全为 A-Z、a-z）或 "0"（否则）</dd>
 </dl>
@@ -277,10 +317,12 @@ $文本重复 ab 3$      → "ababab"
 $判断字母 Hello$        → "1"
 ```
 
+<a id="string-is-lower"></a>
+
 ### `$判断小写$` — 判断是否全为小写
 
 <dl>
-  <dt>签名</dt><dd><code>$判断小写 [字符串]$</code></dd>
+  <dt>格式</dt><dd><code>$判断小写 [字符串]$</code></dd>
   <dt>参数</dt><dd>一个字符串</dd>
   <dt>返回值</dt><dd>"1"（全为小写字母）或空字符串（否则）</dd>
 </dl>
@@ -291,10 +333,12 @@ $判断字母 Hello$        → "1"
 $判断小写 hello$         → "1"
 ```
 
+<a id="string-is-upper"></a>
+
 ### `$判断大写$` — 判断是否全为大写
 
 <dl>
-  <dt>签名</dt><dd><code>$判断大写 [字符串]$</code></dd>
+  <dt>格式</dt><dd><code>$判断大写 [字符串]$</code></dd>
   <dt>参数</dt><dd>一个字符串</dd>
   <dt>返回值</dt><dd>"1"（全为大写字母）或空字符串（否则）</dd>
 </dl>
@@ -305,10 +349,12 @@ $判断小写 hello$         → "1"
 $判断大写 HELLO$         → "1"
 ```
 
+<a id="string-is-whitespace"></a>
+
 ### `$判断空白$` — 判断是否全为空白
 
 <dl>
-  <dt>签名</dt><dd><code>$判断空白 [字符串]$</code></dd>
+  <dt>格式</dt><dd><code>$判断空白 [字符串]$</code></dd>
   <dt>参数</dt><dd>一个字符串</dd>
   <dt>返回值</dt><dd>"1"（全为空白字符）或 "0"（否则）</dd>
 </dl>
@@ -319,10 +365,12 @@ $判断大写 HELLO$         → "1"
 $判断空白 \ \ $           → "1"
 ```
 
+<a id="string-pad-left"></a>
+
 ### `$左对齐$` — 左对齐填充
 
 <dl>
-  <dt>签名</dt><dd><code>$左对齐 [文本] [宽度] [填充字符]$</code></dd>
+  <dt>格式</dt><dd><code>$左对齐 [文本] [宽度] [填充字符]$</code></dd>
   <dt>参数</dt><dd>文本、目标宽度、可选的填充字符（默认空格）</dd>
   <dt>返回值</dt><dd>左对齐并在右侧填充后的字符串</dd>
 </dl>
@@ -333,10 +381,12 @@ $判断空白 \ \ $           → "1"
 $左对齐 hi 5$            → "hi   "
 ```
 
+<a id="string-pad-right"></a>
+
 ### `$右对齐$` — 右对齐填充
 
 <dl>
-  <dt>签名</dt><dd><code>$右对齐 [文本] [宽度] [填充字符]$</code></dd>
+  <dt>格式</dt><dd><code>$右对齐 [文本] [宽度] [填充字符]$</code></dd>
   <dt>参数</dt><dd>文本、目标宽度、可选的填充字符（默认空格）</dd>
   <dt>返回值</dt><dd>右对齐并在左侧填充后的字符串</dd>
 </dl>
@@ -345,10 +395,12 @@ $左对齐 hi 5$            → "hi   "
 $右对齐 42 5 0$          → "00042"
 ```
 
+<a id="string-pad-center"></a>
+
 ### `$居中$` — 居中对齐填充
 
 <dl>
-  <dt>签名</dt><dd><code>$居中 [文本] [宽度] [填充字符]$</code></dd>
+  <dt>格式</dt><dd><code>$居中 [文本] [宽度] [填充字符]$</code></dd>
   <dt>参数</dt><dd>文本、目标宽度、可选的填充字符（默认空格）</dd>
   <dt>返回值</dt><dd>居中对齐并用填充字符两侧填充后的字符串</dd>
 </dl>

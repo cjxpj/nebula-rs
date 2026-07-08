@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import { useTheme } from './composables/useTheme.js'
 import Sidebar from './components/Sidebar.vue'
+import RightNav from './components/RightNav.vue'
 import SearchModal from './components/SearchModal.vue'
 import VersionSwitcher from './components/VersionSwitcher.vue'
 
@@ -47,6 +48,9 @@ function onKeydown(e) {
       <main class="content">
         <router-view />
       </main>
+      <aside v-if="$route.path !== '/'" class="right-aside">
+        <RightNav />
+      </aside>
     </div>
   </div>
   <SearchModal v-if="showSearch" @close="showSearch = false" />
@@ -230,7 +234,7 @@ ul, ol {
 .main {
   display: flex;
   flex: 1;
-  max-width: 1200px;
+  max-width: 1400px;
   margin: 0 auto;
   width: 100%;
 }
@@ -252,8 +256,21 @@ ul, ol {
   min-width: 0;
 }
 
+.right-aside {
+  width: 150px;
+  flex-shrink: 0;
+  padding: 16px 8px 16px 0;
+  height: calc(100vh - var(--header-height));
+  position: sticky;
+  top: var(--header-height);
+  overflow-y: auto;
+}
+
 @media (max-width: 768px) {
   .sidebar {
+    display: none;
+  }
+  .right-aside {
     display: none;
   }
   .content {
