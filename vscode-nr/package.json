@@ -2,18 +2,28 @@
   "name": "nr-language",
   "displayName": "NR Language Support",
   "description": "NR 语言 (Nebula 词库引擎 DSL) 语法高亮与代码补全支持",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "nebula",
+  "icon": "icon.png",
   "main": "./extension.js",
   "engines": {
     "vscode": "^1.75.0"
   },
+  "activationEvents": [
+    "onLanguage:nr"
+  ],
   "categories": ["Programming Languages"],
   "repository": {
     "type": "git",
     "url": "https://github.com/nebula/nr-language"
   },
   "contributes": {
+    "commands": [
+      {
+        "command": "nr.checkUpdate",
+        "title": "NR: 检查更新"
+      }
+    ],
     "languages": [
       {
         "id": "nr",
@@ -39,10 +49,10 @@
       {
         "language": "nr",
         "items": [
-          { "label": "s.", "detail": "字符串操作 (长度, 大写, ...) — 需 #引入=@字符串，函数全局可用", "kind": 8 },
-          { "label": "t.", "detail": "类型转换 (t.转文本, t.转数字, ...) — 需 #引入=@类型", "kind": 8 },
-          { "label": "m.", "detail": "数学运算 (绝对值, 最大值, ...) — 需 #引入=@数学，函数全局可用", "kind": 8 },
-          { "label": "访问.", "detail": "HTTP 网络访问 (访问.发送, 访问.内容, ...) — 需 #引入=@访问", "kind": 8 }
+          { "label": "字符串.", "detail": "字符串操作 — 需 #引入=@字符串", "kind": 8 },
+          { "label": "类型.", "detail": "类型转换 — 需 #引入=@类型", "kind": 8 },
+          { "label": "数学.", "detail": "数学运算 — 需 #引入=@数学", "kind": 8 },
+          { "label": "访问.", "detail": "HTTP 网络访问 — 需 #引入=@访问", "kind": 8 }
         ]
       }
     ]

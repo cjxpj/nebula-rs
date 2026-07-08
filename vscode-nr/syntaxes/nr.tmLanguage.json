@@ -162,11 +162,19 @@
       "match": "#:"
     },
     "import-statement": {
-      "comment": "#引入=@module 或 #引入=name",
+      "comment": "#引入=@module / #引入=file.nr / alias:#引入=file.nr / #引入=dir/ / #引入=a,b,c",
       "patterns": [
         {
           "name": "meta.import",
-          "match": "(#引入=)(@?\\S+)",
+          "match": "(\\w+:#引入=)(@?[^,\\s]+(?:,@?[^,\\s]+)*)",
+          "captures": {
+            "1": { "name": "keyword.control.import" },
+            "2": { "name": "entity.name.namespace" }
+          }
+        },
+        {
+          "name": "meta.import",
+          "match": "(#引入=)(@?[^,\\s]+(?:,@?[^,\\s]+)*)",
           "captures": {
             "1": { "name": "keyword.control.import" },
             "2": { "name": "entity.name.namespace" }

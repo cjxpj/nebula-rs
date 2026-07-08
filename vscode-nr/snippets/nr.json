@@ -59,10 +59,25 @@
     "body": [">终止"],
     "description": "终止当前函数执行"
   },
-  "引入模块": {
+  "引入标准库": {
     "prefix": "#引入",
     "body": ["#引入=@${1:module}", "$0"],
-    "description": "引入外部模块"
+    "description": "引入标准库模块"
+  },
+  "引入文件": {
+    "prefix": "引入文件",
+    "body": ["#引入=${1:file}.nr", "$0"],
+    "description": "引入 .nr 文件（自动以文件名作为包名）"
+  },
+  "引入目录": {
+    "prefix": "引入目录",
+    "body": ["#引入=${1:dir}/", "$0"],
+    "description": "引入目录（自动以目录名作为包名）"
+  },
+  "别名引入": {
+    "prefix": "别名引入",
+    "body": ["${1:alias}:#引入=${2:file}.nr", "$0"],
+    "description": "显式指定包名的别名引入"
   },
   "纯文本块": {
     "prefix": "纯文本>",
@@ -125,24 +140,24 @@
     "description": "获取当前微秒时间戳（内置变量）"
   },
   "字符串操作": {
-    "prefix": "s.",
-    "body": ["$s.${1:长度} ${2:args}$$"],
-    "description": "字符串操作函数"
+    "prefix": "大写",
+    "body": ["$$${1:大写} ${2:args}$$"],
+    "description": "字符串操作函数 (#引入=@字符串)"
   },
   "类型转换": {
-    "prefix": "t.",
-    "body": ["$t.${1:转文本} ${2:value}$$"],
-    "description": "类型转换函数"
+    "prefix": "转",
+    "body": ["$$${1:转文本} ${2:value}$$"],
+    "description": "类型转换函数 (#引入=@类型)"
   },
   "数学操作": {
-    "prefix": "m.",
-    "body": ["$m.${1:绝对值} ${2:args}$$"],
-    "description": "数学运算函数"
+    "prefix": "数学",
+    "body": ["$$${1:绝对值} ${2:args}$$"],
+    "description": "数学运算函数 (#引入=@数学)"
   },
   "网络访问": {
-    "prefix": "访问.",
-    "body": ["$访问.发送 ${1:url}$$"],
-    "description": "网络访问函数 (@访问 模块)"
+    "prefix": "创建访问",
+    "body": ["$$${1:创建访问} ${2:url}$$"],
+    "description": "创建 HTTP 请求对象 (#引入=@访问)"
   },
   "画布操作": {
     "prefix": "画布",
