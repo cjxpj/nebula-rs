@@ -977,7 +977,7 @@ fn create_access_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
 // ===== 访问.切换GET handle$ — 切换为 GET =====
 
 fn change_get_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let handle = get_req_handle(ctx, args);
+    let (handle, _) = get_req_handle_and_offset(ctx, args);
     let Some(mut req) = get_request(&handle) else {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
     };
@@ -1051,7 +1051,7 @@ fn request_post_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -
 // ===== 访问.启用跳转 handle$ — 允许重定向 =====
 
 fn enable_redirects_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let handle = get_req_handle(ctx, args);
+    let (handle, _) = get_req_handle_and_offset(ctx, args);
     let Some(mut req) = get_request(&handle) else {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
     };
@@ -1063,7 +1063,7 @@ fn enable_redirects_fn(ctx: &mut DicContext, args: &[String], _content: &str) ->
 // ===== 访问.禁用跳转 handle$ — 禁止重定向 =====
 
 fn disable_redirects_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let handle = get_req_handle(ctx, args);
+    let (handle, _) = get_req_handle_and_offset(ctx, args);
     let Some(mut req) = get_request(&handle) else {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
     };
@@ -1104,7 +1104,7 @@ fn set_timeout_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
 // ===== 访问.发送 handle$ — 发送请求，结果存入 response =====
 
 fn request_send_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let handle = get_req_handle(ctx, args);
+    let (handle, _) = get_req_handle_and_offset(ctx, args);
     let Some(req) = get_request(&handle) else {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
     };
@@ -1216,7 +1216,7 @@ fn build_multipart_body(req: &AccessRequest, boundary: &str) -> Vec<u8> {
 // ===== 访问.全部内容 handle$ — 返回完整响应 JSON（含状态、头部、data 已屏蔽）=====
 
 fn request_all_content_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let handle = get_req_handle(ctx, args);
+    let (handle, _) = get_req_handle_and_offset(ctx, args);
     let Some(req) = get_request(&handle) else {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
     };
@@ -1243,7 +1243,7 @@ fn request_all_content_fn(ctx: &mut DicContext, args: &[String], _content: &str)
 // ===== 访问.内容 handle$ — 返回响应 body 文本 =====
 
 fn request_content_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let handle = get_req_handle(ctx, args);
+    let (handle, _) = get_req_handle_and_offset(ctx, args);
     let Some(req) = get_request(&handle) else {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
     };
