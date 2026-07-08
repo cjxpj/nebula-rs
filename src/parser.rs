@@ -1,7 +1,14 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use crate::file_lock;
+
+// 解析缓存：key = canonical path 或 @模块名，value = 解析结果
+fn parse_cache() -> &'static Mutex<HashMap<String, BuildValue>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, BuildValue>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// 构建词条：触发词 → 代码块列表
 #[derive(Debug, Clone)]
@@ -127,7 +134,7 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
         // 头部处理
         if runhead {
             if line.contains("#引入=") {
-                // 格式: var:#引入=path  或  #引入=path
+                // 格式: var:#引入=path  或  #引入=path 或 #引入=path1,path2...（批量）
                 let (pkg_name, path) = if let Some(colon_pos) = line.find(":#引入=") {
                     let name = line[..colon_pos].trim().to_string();
                     let p = line[colon_pos..].strip_prefix(":#引入=").unwrap_or("").trim();
@@ -139,48 +146,98 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
                     runheadtext.push(line);
                     continue;
                 };
+                // 批量引入支持：逗号分隔多个路径
+                let paths: Vec<&str> = path.split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                // 带变量名时暂不支持批量
+                if !pkg_name.is_empty() && paths.len() > 1 {
+                    return Err(format!("[错误] {} 第{}行: 带变量名的引入不支持批量（#引入={}）", _dic_path, dic_i + 1, path));
+                }
+
+                for single_path in &paths {
                 // 检测自己引入自己（路径相对于工作目录）
                 // 标准库路径 (@开头) 跳过文件系统检查
-                if !crate::functions::is_stdlib_path(path) {
+                if !crate::functions::is_stdlib_path(single_path) {
                     {
                         let cur = std::path::Path::new(_dic_path);
                         if let Ok(cur_canon) = cur.canonicalize() {
-                            let tgt = std::path::Path::new(path);
+                            let tgt = std::path::Path::new(single_path);
                             if let Ok(tgt_canon) = tgt.canonicalize() {
                                 if cur_canon == tgt_canon || (tgt_canon.is_dir() && cur_canon.starts_with(&tgt_canon)) {
-                                    return Err(format!("[错误] {} 第{}行: 不能引入自己（#引入={}）", _dic_path, dic_i + 1, path));
+                                    return Err(format!("[错误] {} 第{}行: 不能引入自己（#引入={}）", _dic_path, dic_i + 1, single_path));
                                 }
                             }
                         }
                     }
                 }
 
-                // 标准库引入：@模块名 → 创建标记包
-                let merged = if crate::functions::is_stdlib_path(path) {
-                    let module = &path[1..]; // 去掉 @
+                // 标准库引入：@模块名 → 创建标记包（带缓存）
+                let merged = if crate::functions::is_stdlib_path(single_path) {
+                    let module = &single_path[1..]; // 去掉 @
                     if module.is_empty() {
-                        return Err(format!("[错误] {} 第{}行: 标准库模块名不能为空（#引入={}）", _dic_path, dic_i + 1, path));
+                        return Err(format!("[错误] {} 第{}行: 标准库模块名不能为空（#引入={}）", _dic_path, dic_i + 1, single_path));
                     }
                     if crate::functions::StdLib::resolve(module).is_none() {
-                        return Err(format!("[错误] {} 第{}行: 标准库模块不存在：{}（#引入={}）", _dic_path, dic_i + 1, module, path));
+                        return Err(format!("[错误] {} 第{}行: 标准库模块不存在：{}（#引入={}）", _dic_path, dic_i + 1, module, single_path));
                     }
-                    Some(crate::functions::create_stdlib_package(module))
-                } else {
-                    // 先检测是否为文件夹，是则加载文件夹下所有 .nr 文件
-                    let dir_path = std::path::Path::new(path);
-                    if dir_path.is_dir() {
-                        let mut merged_bv = merge_dir_package(path)?;
-                        // 清除合并后的 head（各文件 head 仅通过分包执行）
-                        merged_bv.head.clear();
-                        Some(merged_bv)
-                    } else {
-                        // 不是文件夹，则必须为 .nr 文件
-                        if !path.ends_with(".nr") {
-                            return Err(format!("[错误] {} 第{}行: 引入文件必须为 .nr 后缀：{}（#引入={}）", _dic_path, dic_i + 1, path, path));
+                    let cache_key = format!("@{}", module);
+                    {
+                        let mut cache = parse_cache().lock().unwrap();
+                        if let Some(cached) = cache.get(&cache_key) {
+                            Some(cached.clone())
+                        } else {
+                            let pkg = crate::functions::create_stdlib_package(module);
+                            cache.insert(cache_key, pkg.clone());
+                            Some(pkg)
                         }
-                        match file_lock::with_file_read(std::path::Path::new(path), || fs::read_to_string(path)) {
-                            Ok(file_data) => Some(build_dic(_dic_path, &file_data)?),
-                            Err(_) => None,
+                    }
+                } else {
+                    // 先检测是否为文件夹，是则加载文件夹下所有 .nr 文件（带缓存）
+                    let dir_path = std::path::Path::new(single_path);
+                    if dir_path.is_dir() {
+                        let cache_key = match std::path::Path::new(single_path).canonicalize() {
+                            Ok(p) => p.to_string_lossy().to_string(),
+                            Err(_) => single_path.to_string(),
+                        };
+                        {
+                             let mut cache = parse_cache().lock().unwrap();
+                             if let Some(cached) = cache.get(&cache_key) {
+                                 let mut merged_bv = cached.clone();
+                                 merged_bv.head.clear();
+                                 Some(merged_bv)
+                             } else {
+                                 let full = merge_dir_package(single_path)?;
+                                 cache.insert(cache_key, full.clone());
+                                 let mut merged_bv = full;
+                                 merged_bv.head.clear();
+                                 Some(merged_bv)
+                             }
+                         }
+                    } else {
+                        // 不是文件夹，则必须为 .nr 文件（带缓存）
+                        if !single_path.ends_with(".nr") {
+                            return Err(format!("[错误] {} 第{}行: 引入文件必须为 .nr 后缀：{}（#引入={}）", _dic_path, dic_i + 1, single_path, single_path));
+                        }
+                        let cache_key = match std::path::Path::new(single_path).canonicalize() {
+                            Ok(p) => p.to_string_lossy().to_string(),
+                            Err(_) => single_path.to_string(),
+                        };
+                        {
+                            let mut cache = parse_cache().lock().unwrap();
+                            if let Some(cached) = cache.get(&cache_key) {
+                                Some(cached.clone())
+                            } else {
+                                match file_lock::with_file_read(std::path::Path::new(single_path), || fs::read_to_string(single_path)) {
+                                    Ok(file_data) => {
+                                        let parsed = build_dic(_dic_path, &file_data)?;
+                                        cache.insert(cache_key, parsed.clone());
+                                        Some(parsed)
+                                    }
+                                    Err(_) => None,
+                                }
+                            }
                         }
                     }
                 };
@@ -190,58 +247,39 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
                         // var:#引入=path —— 作为面对像包，剥离 . 前缀（.web 存为 web）
                         let pkg_key = pkg_name.strip_prefix('.').unwrap_or(&pkg_name).to_string();
                         packages.insert(pkg_key, z);
-                        runheadtext.push(line);
                     } else if is_stdlib {
                         // #引入=@模块名 —— 标准库无变量名时，以模块名作为包名存入 packages
                         let module = z.stdlib_module.as_deref().unwrap_or("unknown");
                         packages.insert(module.to_string(), z);
-                        runheadtext.push(line);
                     } else {
-                        // #引入=path —— 直接合并（兼容旧语法），合并所有词条并检测冲突
-                        runheadtext.push(line);
-                        // 合并被引入文件的 head（变量初始化）
-                        for h in &z.head {
-                            runheadtext.push(h.clone());
-                        }
-
-                        // 合并 packages
-                        for (k, v) in z.packages {
-                            if packages.contains_key(&k) {
-                                return Err(format!("[错误] {} 第{}行: 引入合并时包名 '{}' 冲突", _dic_path, dic_i + 1, k));
+                        // #引入=path —— Python 风格：自动以文件名/目录名作为包名存入 packages
+                        let auto_name = if is_stdlib {
+                            z.stdlib_module.as_deref().unwrap_or("unknown").to_string()
+                        } else {
+                            let path_ref = std::path::Path::new(single_path);
+                            if single_path.ends_with(".nr") {
+                                path_ref.file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or(single_path)
+                                    .to_string()
+                            } else {
+                                path_ref.file_name()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or(single_path)
+                                    .to_string()
                             }
-                            packages.insert(k, v);
+                        };
+                        if packages.contains_key(&auto_name) {
+                            // 同名包已存在 → 跳过（幂等引入，类似 Python import 行为）
+                        } else {
+                            packages.insert(auto_name, z);
                         }
-
-                        // 检测并合并 dic
-                        for item in &z.dic {
-                            if seen_dic.contains(&item.trigger) {
-                                return Err(format!("[错误] {} 第{}行: 引入合并时词条 '{}' 冲突", _dic_path, dic_i + 1, item.trigger));
-                            }
-                            seen_dic.insert(item.trigger.clone());
-                        }
-                        dic_text.extend(z.dic);
-
-                        // 检测并合并 local_static
-                        for item in &z.local_static {
-                            if seen_static.contains(&item.trigger) {
-                                return Err(format!("[错误] {} 第{}行: 引入合并时 [内部] '{}' 冲突", _dic_path, dic_i + 1, item.trigger));
-                            }
-                            seen_static.insert(item.trigger.clone());
-                        }
-                        func_text.extend(z.local_static);
-
-                        // 检测并合并 local_func
-                        for item in &z.local_func {
-                            if seen_func.contains(&item.trigger) {
-                                return Err(format!("[错误] {} 第{}行: 引入合并时 [函数] '{}' 冲突", _dic_path, dic_i + 1, item.trigger));
-                            }
-                            seen_func.insert(item.trigger.clone());
-                        }
-                        chajian_text.extend(z.local_func);
                     }
                 } else {
-                    return Err(format!("[错误] {} 第{}行: 引入目标不存在：{}（#引入={}）", _dic_path, dic_i + 1, path, path));
+                    return Err(format!("[错误] {} 第{}行: 引入目标不存在：{}（#引入={}）", _dic_path, dic_i + 1, single_path, single_path));
                 }
+                } // end-of for single_path
+                runheadtext.push(line);
                 continue;
             }
 
@@ -427,12 +465,37 @@ fn is_chinese_char(c: char) -> bool {
     matches!(c as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0x20000..=0x2A6DF)
 }
 
-/// 从文件加载并解析
+/// 从文件加载并解析（带缓存）
 pub fn parse_file(path: &str) -> Result<BuildValue, String> {
+    let cache_key = match std::path::Path::new(path).canonicalize() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(_) => path.to_string(),
+    };
+    {
+        let cache = parse_cache().lock().unwrap();
+        if let Some(cached) = cache.get(&cache_key) {
+            return Ok(cached.clone());
+        }
+    }
     let text = file_lock::with_file_read(std::path::Path::new(path), || {
         fs::read_to_string(path).map_err(|e| format!("读取文件失败: {}", e))
     })?;
-    build_dic(path, &text)
+    let result = build_dic(path, &text)?;
+    {
+        let mut cache = parse_cache().lock().unwrap();
+        cache.insert(cache_key, result.clone());
+    }
+    Ok(result)
+}
+
+/// 热重载时清除指定路径的缓存（文件或目录）
+pub fn invalidate_parse_cache(path: &str) {
+    let cache_key = match std::path::Path::new(path).canonicalize() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(_) => path.to_string(),
+    };
+    let mut cache = parse_cache().lock().unwrap();
+    cache.remove(&cache_key);
 }
 
 /// 合并目录下所有 .nr 文件为一个 BuildValue
@@ -460,13 +523,30 @@ pub fn merge_dir_package(dir_path: &str) -> Result<BuildValue, String> {
         }
         let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
         let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string();
-        let data = file_lock::with_file_read(&p, || {
-            fs::read_to_string(&p)
-                .map_err(|e| format!("[错误] 无法读取文件 '{}': {}", fname, e))
-        })?;
         let p_str = p.to_string_lossy().to_string();
-        let bv = build_dic(&p_str, &data)
-            .map_err(|e| format!("[错误] 文件 '{}' 解析失败: {}", fname, e))?;
+
+        // 带缓存的单文件解析
+        let cache_key = match p.canonicalize() {
+            Ok(cp) => cp.to_string_lossy().to_string(),
+            Err(_) => p_str.clone(),
+        };
+        let bv = {
+            let cache = parse_cache().lock().unwrap();
+            if let Some(cached) = cache.get(&cache_key) {
+                cached.clone()
+            } else {
+                drop(cache); // avoid holding lock during I/O
+                let data = file_lock::with_file_read(&p, || {
+                    fs::read_to_string(&p)
+                        .map_err(|e| format!("[错误] 无法读取文件 '{}': {}", fname, e))
+                })?;
+                let parsed = build_dic(&p_str, &data)
+                    .map_err(|e| format!("[错误] 文件 '{}' 解析失败: {}", fname, e))?;
+                let mut cache = parse_cache().lock().unwrap();
+                cache.insert(cache_key, parsed.clone());
+                parsed
+            }
+        };
 
         // 检测跨文件命名冲突（三类全覆盖）
         for item in &bv.dic {

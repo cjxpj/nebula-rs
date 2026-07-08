@@ -1,6 +1,56 @@
 const vscode = require('vscode');
+const path = require('path');
+const fs = require('fs');
 
-// ============ 模块函数注册表 ============
+// ============ 版本信息 ============
+
+/** 从 package.json 读取当前版本号 */
+function getVersion() {
+    try {
+        const pkgPath = path.join(__dirname, 'package.json');
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+        return pkg.version || '0.0.0';
+    } catch {
+        return '0.0.0';
+    }
+}
+
+const EXT_VERSION = getVersion();
+
+/** 远程版本信息地址（GitHub Pages） */
+const VERSION_URL = 'https://cjxpj.github.io/nebula-rs/vscode-nr/version.json';
+
+/** 检测远程版本，返回 [最新版本号, 是否为更新] */
+async function checkUpdate() {
+    try {
+        const https = require('https');
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+
+        const res = await fetch(VERSION_URL, { signal: controller.signal });
+        clearTimeout(timeout);
+
+        if (!res.ok) { return null; }
+        const data = await res.json();
+        const remoteVer = data.version || '0.0.0';
+        const isNewer = compareVersions(remoteVer, EXT_VERSION) > 0;
+        return [remoteVer, isNewer];
+    } catch {
+        return null;
+    }
+}
+
+/** 比较版本号 a > b 返回正数 */
+function compareVersions(a, b) {
+    const pa = a.split('.').map(Number);
+    const pb = b.split('.').map(Number);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const na = pa[i] || 0;
+        const nb = pb[i] || 0;
+        if (na !== nb) { return na - nb; }
+    }
+    return 0;
+}
 
 /** 核心函数（始终可用） */
 const CORE = [
@@ -139,7 +189,7 @@ const MODULES = {
 // ============ 激活入口 ============
 
 function activate(context) {
-    // ── 状态栏：显示已加载模块 ──
+    // ── 状态栏：显示版本与已加载模块 ──
     const statusBar = vscode.window.createStatusBarItem(
         vscode.StatusBarAlignment.Right, 99
     );
@@ -148,12 +198,13 @@ function activate(context) {
         if (editor && editor.document.languageId === 'nr') {
             const modules = scanImports(editor.document);
             if (modules.length === 0) {
-                statusBar.text = 'NR';
+                statusBar.text = `NR v${EXT_VERSION}`;
                 statusBar.tooltip = '无引入模块 — 仅核心函数可用';
             } else {
-                statusBar.text = `NR +${modules.length}模块`;
+                statusBar.text = `NR v${EXT_VERSION} +${modules.length}模块`;
                 statusBar.tooltip = '已加载: ' + modules.join(', ');
             }
+            statusBar.command = 'nr.checkUpdate';
             statusBar.show();
         } else {
             statusBar.hide();
@@ -166,6 +217,54 @@ function activate(context) {
         vscode.workspace.onDidChangeTextDocument(updateStatusBar),
         statusBar
     );
+
+    // ── 命令：手动检查更新 ──
+    const checkCmd = vscode.commands.registerCommand('nr.checkUpdate', async () => {
+        const result = await checkUpdate();
+        if (!result) {
+            vscode.window.showInformationMessage(
+                `NR Language Support v${EXT_VERSION} — 无法检查更新（网络不可达）`
+            );
+            return;
+        }
+        const [remoteVer, isNewer] = result;
+        if (isNewer) {
+            const action = await vscode.window.showInformationMessage(
+                `发现新版本 v${remoteVer}（当前 v${EXT_VERSION}）`,
+                '下载',
+                '稍后'
+            );
+            if (action === '下载') {
+                vscode.env.openExternal(
+                    vscode.Uri.parse('https://cjxpj.github.io/nebula-rs/')
+                );
+            }
+        } else {
+            vscode.window.showInformationMessage(
+                `NR Language Support v${EXT_VERSION} 已是最新版本`
+            );
+        }
+    });
+    context.subscriptions.push(checkCmd);
+
+    // ── 启动时自动检测更新 ──
+    checkUpdate().then(result => {
+        if (result) {
+            const [remoteVer, isNewer] = result;
+            if (isNewer) {
+                vscode.window.showInformationMessage(
+                    `NR Language Support 有新版本 v${remoteVer}（当前 v${EXT_VERSION}），点击下载`,
+                    '下载'
+                ).then(action => {
+                    if (action === '下载') {
+                        vscode.env.openExternal(
+                            vscode.Uri.parse('https://cjxpj.github.io/nebula-rs/')
+                        );
+                    }
+                });
+            }
+        }
+    });
 
     // ── 补全 Provider ──
     const provider = vscode.languages.registerCompletionItemProvider('nr', {

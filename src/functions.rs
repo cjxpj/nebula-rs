@@ -66,8 +66,8 @@ fn format_f64(v: f64) -> String {
 /// ```nr
 /// #引入=@字符串      ← 不赋变量名，函数直接全局可用：$大写 hello$
 /// #引入=@数学        ← 不赋变量名，函数直接全局可用：$绝对值 -5$
-/// a:#引入=@访问      ← 赋变量名（有状态），调用：$a.新建 url$
-/// b:#引入=@画布      ← 赋变量名（有状态），调用：$b.创建画布 100 100$
+/// #引入=@访问        ← 不赋变量名，创建 OOP 对象：$创建访问 url$
+/// #引入=@画布      ← 不赋变量名，函数直接全局可用：$创建画布 100 100$
 /// ```
 ///
 /// # 模块列表
@@ -78,7 +78,7 @@ fn format_f64(v: f64) -> String {
 /// | `@内置` | 截取, 替换, 删前缀, 删后缀 |
 /// | `@数学` | 绝对值, 最大值, 最小值, 取整, 幂运算, 求和, 向上取整, 向下取整 |
 /// | `@类型` | 转文本, 转数字, 转整数, 转浮点 |
-/// | `@访问` | 新建, 切换GET, 切换POST, POST, POST文件, 启用跳转, 禁用跳转, 设置头部, 设置超时, 发送, 全部内容, 内容 |
+/// | `@访问` | 创建访问, 切换GET, 切换POST, POST, POST文件, 启用跳转, 禁用跳转, 设置头部, 设置超时, 发送, 全部内容, 内容 |
 /// | `@画布` | 创建画布, 画布.获取, 画笔.设置颜色, ... 等 30 个函数 |
 /// | `@文件` | 写文件, 读文件, 写, 读, 删除文件, 删除文件夹, 存在文件, 存在文件夹, 存在文件或文件夹, 文件后缀, 读文件行, 文件夹列表, 文件列表, 随机文件夹名, 随机文件名, 文件夹大小, 文件大小, 重命名, 复制粘贴, 下载文件 |
 pub struct StdLib;
@@ -130,7 +130,7 @@ impl StdLib {
                 ("转浮点", to_float_fn as BuiltinFn),
             ],
             "访问" => vec![
-                ("新建", new_request_fn as BuiltinFn),
+                ("创建访问", create_access_fn as BuiltinFn),
                 ("切换GET", change_get_fn as BuiltinFn),
                 ("切换POST", change_post_fn as BuiltinFn),
                 ("POST", request_post_fn as BuiltinFn),
@@ -946,14 +946,15 @@ fn ensure_http(url: &str) -> String {
     }
 }
 
-// ===== 访问.新建 url$ — 创建请求对象，返回 handle =====
+// ===== 创建访问 url$ — 创建请求对象，返回 OOP 对象引用 =====
 
-fn new_request_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+fn create_access_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let url = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     if url.is_empty() {
-        return Some(format!("[错误] {} 访问.新建 需要 URL", ctx.sys.file_location()));
+        return Some(format!("[错误] {} 创建访问 需要 URL", ctx.sys.file_location()));
     }
-    let handle = format!("req_{}", next_instance_id());
+    let instance_id = next_instance_id();
+    let handle = format!("访问请求@{}", instance_id);
     let req = AccessRequest {
         method: "get".to_string(),
         url: ensure_http(&url),
@@ -965,9 +966,12 @@ fn new_request_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
         stop_redirect: false,
     };
     set_request(&handle, req);
-    // 将 handle 存入变量
-    ctx.val.p.set_string("_", handle.clone());
-    Some(handle)
+    // 返回 OOP 对象引用（\x00 标记，与 $new$ 保持一致）
+    let mut result = String::new();
+    result.push('\x00');
+    result.push_str(&handle);
+    result.push('\x00');
+    Some(result)
 }
 
 // ===== 访问.切换GET handle$ — 切换为 GET =====
@@ -985,12 +989,12 @@ fn change_get_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Optio
 // ===== 访问.切换POST handle [body]$ — 切换为 POST 并可选设置 body =====
 
 fn change_post_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let handle = get_req_handle(ctx, args);
+    let (handle, offset) = get_req_handle_and_offset(ctx, args);
     let Some(mut req) = get_request(&handle) else {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
     };
     req.method = "post".to_string();
-    if let Some(body) = args.get(2) {
+    if let Some(body) = args.get(offset) {
         req.body = ctx.val.text(body);
     }
     set_request(&handle, req);
@@ -1000,12 +1004,12 @@ fn change_post_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
 // ===== 访问.POST handle body$ — 设置 POST body =====
 
 fn request_post_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let handle = get_req_handle(ctx, args);
+    let (handle, offset) = get_req_handle_and_offset(ctx, args);
     let Some(mut req) = get_request(&handle) else {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
     };
     req.method = "post".to_string();
-    req.body = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    req.body = ctx.val.text(args.get(offset).map(|s| s.as_str()).unwrap_or(""));
     set_request(&handle, req);
     None
 }
@@ -1013,24 +1017,24 @@ fn request_post_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opt
 // ===== 访问.POST文件 handle field data [filename]$ — 设置 multipart 文件 =====
 
 fn request_post_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let handle = get_req_handle(ctx, args);
+    let (handle, offset) = get_req_handle_and_offset(ctx, args);
     let Some(mut req) = get_request(&handle) else {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
     };
     req.method = "post".to_string();
 
-    let field = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
-    let data = ctx.val.text(args.get(3).map(|s| s.as_str()).unwrap_or("")).into_bytes();
+    let field = ctx.val.text(args.get(offset).map(|s| s.as_str()).unwrap_or(""));
+    let data = ctx.val.text(args.get(offset + 1).map(|s| s.as_str()).unwrap_or("")).into_bytes();
 
-    let (filename, file_data) = if let Some(fname) = args.get(4) {
+    let (filename, file_data) = if let Some(fname) = args.get(offset + 2) {
         (ctx.val.text(fname).into_bytes(), data)
     } else {
-        let fname = if let Some(fn_var) = args.get(5) {
+        let fname = if let Some(fn_var) = args.get(offset + 3) {
             ctx.val.text(fn_var).into_bytes()
         } else {
             field.clone().into_bytes()
         };
-        let fdata = if let Some(d) = args.get(4) {
+        let fdata = if let Some(d) = args.get(offset + 2) {
             ctx.val.text(d).into_bytes()
         } else {
             data
@@ -1071,11 +1075,11 @@ fn disable_redirects_fn(ctx: &mut DicContext, args: &[String], _content: &str) -
 // ===== 访问.设置头部 handle json_headers$ — 设置请求头 =====
 
 fn set_headers_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let handle = get_req_handle(ctx, args);
+    let (handle, offset) = get_req_handle_and_offset(ctx, args);
     let Some(mut req) = get_request(&handle) else {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
     };
-    let headers_str = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let headers_str = ctx.val.text(args.get(offset).map(|s| s.as_str()).unwrap_or(""));
     if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&headers_str) {
         req.headers = map;
     }
@@ -1086,11 +1090,11 @@ fn set_headers_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
 // ===== 访问.设置超时 handle seconds$ — 设置超时秒数 =====
 
 fn set_timeout_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let handle = get_req_handle(ctx, args);
+    let (handle, offset) = get_req_handle_and_offset(ctx, args);
     let Some(mut req) = get_request(&handle) else {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
     };
-    req.timeout = args.get(2)
+    req.timeout = args.get(offset)
         .and_then(|s| ctx.val.text(s).trim().parse::<usize>().ok())
         .unwrap_or(15);
     set_request(&handle, req);
@@ -1421,13 +1425,30 @@ fn request_forward_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> 
     }
 }
 
-/// 从 args 获取请求 handle：优先从参数1取，否则从 _ 变量取
+/// 从 args 获取请求 handle：优先从参数1取（若看起来是句柄），否则从 _ 变量取（OOP 模式）
 fn get_req_handle(ctx: &mut DicContext, args: &[String]) -> String {
     if let Some(h) = args.get(1) {
         let h = ctx.val.text(h);
-        if !h.is_empty() { return h; }
+        if !h.is_empty() && (h.starts_with("req_") || h.contains("访问请求@")) {
+            return h;
+        }
     }
     ctx.val.p.get_cloned("_")
+}
+
+/// 获取请求句柄和参数起始偏移（OOP 兼容）
+/// 返回 (handle, data_start_index)
+/// - 显式句柄模式：args[1] 是句柄 → data_start=2
+/// - OOP 模式：句柄来自 _ 变量 → data_start=1
+fn get_req_handle_and_offset(ctx: &mut DicContext, args: &[String]) -> (String, usize) {
+    if let Some(h) = args.get(1) {
+        let h = ctx.val.text(h);
+        if !h.is_empty() && (h.starts_with("req_") || h.contains("访问请求@")) {
+            return (h, 2);
+        }
+    }
+    let handle = ctx.val.p.get_cloned("_");
+    (handle, 1)
 }
 
 // ===== 类型转换 =====

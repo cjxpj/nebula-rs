@@ -566,6 +566,7 @@ impl DicContext {
             std::fs::read_to_string(&actual_path).ok()
         });
         let Some(data) = data else { return; };
+        crate::parser::invalidate_parse_cache(&actual_path);
         if let Ok(pkg_bv) = crate::parser::build_dic(&actual_path, &data) {
             // 处理头部赋值行（引入包不执行非赋值 head 行）
             for line in &pkg_bv.head {
@@ -668,6 +669,7 @@ impl DicContext {
             }
         }
 
+        crate::parser::invalidate_parse_cache(dir_path);
         match crate::parser::merge_dir_package(dir_path) {
             Ok(merged_bv) => {
                 // 处理头部赋值行（引入包不执行非赋值 head 行）
@@ -1308,8 +1310,17 @@ impl DicContext {
                             } else {
                                 // 尝试作为类名.内置函数调用（如 $.回调 → Counter.回调 → 调用 回调 内置函数）
                                 if let Some(&builtin_fn) = self.shared.builtins.get(method) {
+                                    // OOP 上下文：设置 _ 为对象引用，使内置函数能获取请求句柄
+                                    let saved_underscore = self.val.p.get_cloned("_");
+                                    self.val.p.set_string("_", resolved_obj.clone());
                                     if let Some(output) = builtin_fn(self, &args, content) {
                                         result.push_str(&output);
+                                    }
+                                    // 恢复 _ （避免 OOP 调用后残留 _ 污染后续代码）
+                                    if saved_underscore.is_empty() {
+                                        self.val.p.remove("_");
+                                    } else {
+                                        self.val.p.set_string("_", saved_underscore);
                                     }
                                 } else {
                                     result.push('$');
@@ -2638,14 +2649,19 @@ fn entry_fallback(ctx: &mut DicContext, txt: &[String]) {
                             continue;
                         }
 
-                        // 运行时 #引入= 热重载
+                        // 运行时 #引入= 热重载（支持批量逗号分隔）
                         if v_suffix.contains("#引入=") {
-                            if let Some(path) = v_suffix.strip_prefix("#引入=") {
+                            if let Some(paths_str) = v_suffix.strip_prefix("#引入=") {
                                 // #引入= 始终创建包（剥离 . 前缀作为包名）
                                 let pkg_name = v_prefix.strip_prefix('.').unwrap_or(&v_prefix);
-                                ctx.reload_package(pkg_name, path.trim());
+                                for path in paths_str.split(',') {
+                                    let path = path.trim();
+                                    if !path.is_empty() && !path.starts_with('@') {
+                                        ctx.reload_package(pkg_name, path);
+                                    }
+                                }
                                 // 同时存入变量
-                                ctx.val.p.set_string(&v_prefix, path.trim().to_string());
+                                ctx.val.p.set_string(&v_prefix, paths_str.trim().to_string());
                             }
                         } else if v_suffix.starts_with('[') && v_suffix.ends_with(']') {
                             let evaluated = ctx.val.text(&v_suffix);

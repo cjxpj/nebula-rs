@@ -51,7 +51,7 @@ src/
 | [表达式](https://cjxpj.github.io/nebula-rs/#/v1.0/expressions) | 数学运算、比较、逻辑运算 |
 | [控制流](https://cjxpj.github.io/nebula-rs/#/v1.0/control-flow) | 条件分支、循环、中断与跳转 |
 | [词条系统](https://cjxpj.github.io/nebula-rs/#/v1.0/entries) | 普通词条、内部词条、类词条 |
-| [函数](https://cjxpj.github.io/nebula-rs/#/v1.0/functions) | 定义语法、参数、初始化 |
+| [函数](https://cjxpj.github.io/nebula-rs/#/v1.0/functions) | 定义语法、参数、初始化、main 入口 |
 | [JSON 数据处理](https://cjxpj.github.io/nebula-rs/#/v1.0/json) | 内联 JSON、导航读写 |
 | [面向对象](https://cjxpj.github.io/nebula-rs/#/v1.0/oop) | 类定义、实例化、方法调用 |
 | [模块与引入](https://cjxpj.github.io/nebula-rs/#/v1.0/modules) | 文件/目录引入、热更新 |

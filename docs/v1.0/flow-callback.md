@@ -17,4 +17,25 @@
 $回调 say_hello$          ← 匹配 say_(.*)，%括号1%=hello
 ```
 
+### 配合标准库示例
+
+`$回调$` 常用于分发请求到不同的内部处理逻辑。
+
+`handlers.nr`
+
+```
+[内部]cmd_(.*)
+任务 %括号1% 执行中
+```
+
+`main.nr`
+
+```
+#引入=handlers.nr
+
+[函数]main
+result:$handlers.回调 cmd_deploy$
+$打印 %result%$
+```
+
 > 回调机制基于正则匹配内部词条，在独立子上下文中执行。
