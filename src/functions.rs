@@ -1425,17 +1425,6 @@ fn request_forward_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> 
     }
 }
 
-/// 从 args 获取请求 handle：优先从参数1取（若看起来是句柄），否则从 _ 变量取（OOP 模式）
-fn get_req_handle(ctx: &mut DicContext, args: &[String]) -> String {
-    if let Some(h) = args.get(1) {
-        let h = ctx.val.text(h);
-        if !h.is_empty() && (h.starts_with("req_") || h.contains("访问请求@")) {
-            return h;
-        }
-    }
-    ctx.val.p.get_cloned("_")
-}
-
 /// 获取请求句柄和参数起始偏移（OOP 兼容）
 /// 返回 (handle, data_start_index)
 /// - 显式句柄模式：args[1] 是句柄 → data_start=2
