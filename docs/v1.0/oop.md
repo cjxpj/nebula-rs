@@ -75,8 +75,8 @@ $.add 1$                ← 等价于 $Counter.add 1$
 当前计数：%.count%
 ```
 
-- `$.method$` 通过 `_` 变量自动解析为 `ClassName.method`
-- 只能在类方法内部使用（`_` 变量不为空时生效）
+- `$.method$` 通过 `self` 变量自动解析为 `ClassName.method`
+- 只能在类方法内部使用（`self` 变量不为空时生效）
 - 支持传参：`$.method arg1 arg2$`
 
 ## 构造函数与输出

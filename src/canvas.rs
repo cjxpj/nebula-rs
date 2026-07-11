@@ -168,10 +168,40 @@ fn base64_encode(data: &[u8]) -> String {
 
 // ==================== 颜色解析 ====================
 
+/// 命名颜色表
+fn named_color(s: &str) -> Option<[u8; 4]> {
+    let lower = s.to_lowercase();
+    match lower.as_str() {
+        "red" | "红色" => Some([255, 0, 0, 255]),
+        "green" | "绿色" => Some([0, 128, 0, 255]),
+        "blue" | "蓝色" => Some([0, 0, 255, 255]),
+        "black" | "黑色" => Some([0, 0, 0, 255]),
+        "white" | "白色" => Some([255, 255, 255, 255]),
+        "yellow" | "黄色" => Some([255, 255, 0, 255]),
+        "cyan" | "青色" => Some([0, 255, 255, 255]),
+        "magenta" | "紫色" | "品红" => Some([255, 0, 255, 255]),
+        "gray" | "grey" | "灰色" => Some([128, 128, 128, 255]),
+        "orange" | "橙色" => Some([255, 165, 0, 255]),
+        "pink" | "粉色" => Some([255, 192, 203, 255]),
+        "brown" | "棕色" => Some([165, 42, 42, 255]),
+        "transparent" | "透明" => Some([0, 0, 0, 0]),
+        "lime" => Some([0, 255, 0, 255]),
+        "navy" | "深蓝" => Some([0, 0, 128, 255]),
+        "teal" | "青绿" => Some([0, 128, 128, 255]),
+        "purple" => Some([128, 0, 128, 255]),
+        "maroon" | "栗色" => Some([128, 0, 0, 255]),
+        "olive" | "橄榄" => Some([128, 128, 0, 255]),
+        "silver" | "银色" => Some([192, 192, 192, 255]),
+        "gold" | "金色" => Some([255, 215, 0, 255]),
+        _ => None,
+    }
+}
+
 /// 解析颜色字符串，支持:
 /// - "#RRGGBB" / "#RRGGBBAA" 十六进制
 /// - "R,G,B" / "R,G,B,A" 逗号分隔
 /// - "随机"
+/// - 英文颜色名（red, blue, green, black, white 等）
 pub fn parse_color(s: &str) -> Option<[u8; 4]> {
     let s = s.trim();
     if s == "随机" {
@@ -181,6 +211,10 @@ pub fn parse_color(s: &str) -> Option<[u8; 4]> {
         let g = ((seed >> 8) & 0xFF) as u8;
         let b = (seed & 0xFF) as u8;
         return Some([r, g, b, 255]);
+    }
+    // 命名颜色
+    if let Some(c) = named_color(s) {
+        return Some(c);
     }
     if s.starts_with('#') {
         let hex = &s[1..];

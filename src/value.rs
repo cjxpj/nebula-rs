@@ -117,6 +117,19 @@ impl Val {
         result
     }
 
+    /// 解析参数默认值：位置参数默认值尝试作为变量引用（%var%）解析
+    pub fn resolve_default(&self, default_val: &str, has_named_params: bool) -> String {
+        if has_named_params {
+            return default_val.to_string();
+        }
+        let resolved = self.text(&format!("%{}%", default_val));
+        if resolved.starts_with('%') && resolved.ends_with('%') {
+            default_val.to_string()
+        } else {
+            resolved
+        }
+    }
+
     /// 带全局变量的文本替换
     pub fn text_with_vals(input: &str, local: &HashMap<String, Value>, global: Option<&HashMap<String, Value>>) -> String {
         if !input.contains('%') {

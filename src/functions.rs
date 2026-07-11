@@ -1,4 +1,4 @@
-use crate::interpreter::{DicContext, BuiltinFn, entry};
+﻿use crate::interpreter::{DicContext, BuiltinFn, entry};
 use crate::parser::BuildValue;
 use crate::canvas;
 use crate::file_lock;
@@ -11,7 +11,7 @@ use std::io::Write;
 
 static INSTANCE_ID: AtomicUsize = AtomicUsize::new(0);
 
-fn next_instance_id() -> usize {
+pub(crate) fn next_instance_id() -> usize {
     INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
@@ -53,6 +53,233 @@ fn set_request(handle: &str, req: AccessRequest) {
     }
 }
 
+// ==================== @基础 模块函数 ====================
+
+/// Python range(stop) 或 range(start, stop, step)
+/// 返回 JSON 数组字符串
+fn range_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let a = resolve_num(ctx, args.get(1).map(|s| s.as_str()).unwrap_or("")).unwrap_or(0) as i64;
+    let b = args.get(2).and_then(|s| resolve_num(ctx, s)).map(|n| n as i64);
+    let c = args.get(3).and_then(|s| resolve_num(ctx, s)).map(|n| n as i64);
+
+    let (start, end, step) = match (b, c) {
+        (Some(end), Some(step)) => (a, end, step),
+        (Some(end), None) => (a, end, 1),
+        (None, _) => (0, a, 1),
+    };
+
+    if step == 0 {
+        return Some("[]".to_string());
+    }
+
+    let mut result: Vec<i64> = Vec::new();
+    if step > 0 {
+        let mut i = start;
+        while i < end {
+            result.push(i);
+            i += step;
+        }
+    } else {
+        let mut i = start;
+        while i > end {
+            result.push(i);
+            i += step;
+        }
+    }
+
+    let json: Vec<serde_json::Value> = result
+        .into_iter()
+        .map(|n| serde_json::Value::Number(n.into()))
+        .collect();
+    Some(serde_json::Value::Array(json).to_string())
+}
+
+/// Python enumerate(list) — 返回 [[index, value], ...]
+fn enumerate_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let list_str = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&list_str).unwrap_or_default();
+    let result: Vec<serde_json::Value> = arr
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| serde_json::json!([i, v]))
+        .collect();
+    Some(serde_json::Value::Array(result).to_string())
+}
+
+/// Python zip(list_a, list_b) — 配对两个 JSON 数组
+fn zip_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let a_str = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let b_str = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let a: Vec<serde_json::Value> = serde_json::from_str(&a_str).unwrap_or_default();
+    let b: Vec<serde_json::Value> = serde_json::from_str(&b_str).unwrap_or_default();
+    let len = a.len().min(b.len());
+    let result: Vec<serde_json::Value> = (0..len)
+        .map(|i| serde_json::json!([a[i], b[i]]))
+        .collect();
+    Some(serde_json::Value::Array(result).to_string())
+}
+
+/// Python reversed(list) — 反转 JSON 数组
+fn reversed_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let list_str = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let mut arr: Vec<serde_json::Value> = serde_json::from_str(&list_str).unwrap_or_default();
+    arr.reverse();
+    Some(serde_json::Value::Array(arr).to_string())
+}
+
+/// Python sorted(list, reverse?) — 排序 JSON 数组
+fn sorted_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let list_str = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let reverse = args.get(2).map(|s| s.as_str()).unwrap_or("") == "true";
+    let mut arr: Vec<serde_json::Value> = serde_json::from_str(&list_str).unwrap_or_default();
+    arr.sort_by(|a, b| {
+        let sa = val_to_sortable(a);
+        let sb = val_to_sortable(b);
+        sa.cmp(&sb)
+    });
+    if reverse {
+        arr.reverse();
+    }
+    Some(serde_json::Value::Array(arr).to_string())
+}
+
+/// Python all(list) — 所有元素为真返回 "1"，否则 ""
+fn all_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let list_str = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&list_str).unwrap_or_default();
+    let all_true = arr.iter().all(|v| is_truthy_val(v));
+    Some(if all_true { "1".to_string() } else { String::new() })
+}
+
+/// Python any(list) — 任一元素为真返回 "1"，否则 ""
+fn any_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let list_str = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&list_str).unwrap_or_default();
+    let any_true = arr.iter().any(|v| is_truthy_val(v));
+    Some(if any_true { "1".to_string() } else { String::new() })
+}
+
+/// Python map(fn_name, list) — 对列表每个元素调用函数，返回结果列表
+fn map_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let fn_name = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let list_str = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&list_str).unwrap_or_default();
+
+    let fn_ptr = ctx.shared.builtins.get(&fn_name).copied();
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for v in &arr {
+        let val_str = val_to_string(v);
+        if let Some(builtin) = fn_ptr {
+            let mut sub_ctx = ctx.clone_for_internal();
+            let result = builtin(&mut sub_ctx, &[fn_name.clone(), val_str.clone()], "");
+            if let Some(ref r) = result {
+                if !r.is_empty() {
+                    results.push(serde_json::Value::String(r.clone()));
+                }
+            }
+        }
+    }
+    Some(serde_json::Value::Array(results).to_string())
+}
+
+/// Python filter(fn_name, list) — 过滤列表，保留函数返回值为真的元素
+fn filter_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let fn_name = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let list_str = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&list_str).unwrap_or_default();
+
+    let fn_ptr = ctx.shared.builtins.get(&fn_name).copied();
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for v in &arr {
+        let val_str = val_to_string(v);
+        if let Some(builtin) = fn_ptr {
+            let mut sub_ctx = ctx.clone_for_internal();
+            let result = builtin(&mut sub_ctx, &[fn_name.clone(), val_str.clone()], "");
+            if let Some(ref r) = result {
+                if !r.is_empty() && r != "0" && r != "false" {
+                    results.push(v.clone());
+                }
+            }
+        }
+    }
+    Some(serde_json::Value::Array(results).to_string())
+}
+
+/// Python bool(value) — 真值转换，返回 "true" 或 ""
+fn to_bool_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let is_true = !s.is_empty() && s != "0" && s != "false" && s != "null";
+    Some(if is_true { "true".to_string() } else { String::new() })
+}
+
+/// Python chr(i) — Unicode 码点转字符
+fn chr_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let n = resolve_num(ctx, args.get(1).map(|s| s.as_str()).unwrap_or("")).unwrap_or(0);
+    let c = char::from_u32(n as u32).unwrap_or('\u{FFFD}');
+    Some(c.to_string())
+}
+
+/// Python ord(c) — 字符转 Unicode 码点
+fn ord_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let code = s.chars().next().map(|c| c as u32).unwrap_or(0);
+    Some(code.to_string())
+}
+
+/// Python bin(n) — 整数转二进制字符串（0b 前缀）
+fn bin_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let n = resolve_num(ctx, args.get(1).map(|s| s.as_str()).unwrap_or("")).unwrap_or(0) as i64;
+    Some(format!("0b{:b}", n))
+}
+
+/// Python hex(n) — 整数转十六进制字符串（0x 前缀）
+fn hex_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let n = resolve_num(ctx, args.get(1).map(|s| s.as_str()).unwrap_or("")).unwrap_or(0) as i64;
+    let abs = n.unsigned_abs();
+    let sign = if n < 0 { "-" } else { "" };
+    Some(format!("{}0x{:x}", sign, abs))
+}
+
+/// Python divmod(a, b) — 返回 [商, 余] JSON 数组
+fn divmod_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let a = resolve_num(ctx, args.get(1).map(|s| s.as_str()).unwrap_or("")).unwrap_or(0) as i64;
+    let b = resolve_num(ctx, args.get(2).map(|s| s.as_str()).unwrap_or("")).unwrap_or(1) as i64;
+    let b = if b == 0 { 1 } else { b };
+    let div = a / b;
+    let rem = a % b;
+    Some(serde_json::json!([div, rem]).to_string())
+}
+
+// ==================== 辅助函数 ====================
+
+/// 将 serde_json::Value 转为可排序的字符串
+fn val_to_sortable(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// 将 serde_json::Value 转为字符串
+fn val_to_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// 判断 serde_json::Value 是否为"真"
+fn is_truthy_val(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(true),
+        serde_json::Value::String(s) => !s.is_empty() && s != "0" && s != "false",
+        serde_json::Value::Array(a) => !a.is_empty(),
+        serde_json::Value::Object(o) => !o.is_empty(),
+    }
+}
+
 fn format_f64(v: f64) -> String {
     if v.fract() == 0.0 { (v as i64).to_string() } else { v.to_string() }
 }
@@ -74,131 +301,26 @@ fn format_f64(v: f64) -> String {
 ///
 /// | 模块名 | 包含函数 |
 /// |--------|---------|
-/// | `@字符串` | 长度, 文本包含, 文本分割, 头尾去空, 大写, 小写, 查找, 计数, 开头判断, 结尾判断, 文本连接, 文本重复, 判断数字, 判断字母, 判断小写, 判断大写, 判断空白, 首字母大写, 大小写互换, 左对齐, 右对齐, 居中 |
-/// | `@内置` | 截取, 替换, 删前缀, 删后缀 |
-/// | `@数学` | 绝对值, 最大值, 最小值, 取整, 幂运算, 求和, 向上取整, 向下取整 |
-/// | `@类型` | 转文本, 转数字, 转整数, 转浮点 |
-/// | `@访问` | 创建访问, 切换GET, 切换POST, POST, POST文件, 启用跳转, 禁用跳转, 设置头部, 设置超时, 发送, 全部内容, 内容 |
+/// | `@访问` | 创建访问, 切换GET, 切换POST, POST, ... 等 12 个函数 |
 /// | `@画布` | 创建画布, 画布.获取, 画笔.设置颜色, ... 等 30 个函数 |
-/// | `@文件` | 写文件, 读文件, 写, 读, 删除文件, 删除文件夹, 存在文件, 存在文件夹, 存在文件或文件夹, 文件后缀, 读文件行, 文件夹列表, 文件列表, 随机文件夹名, 随机文件名, 文件夹大小, 文件大小, 重命名, 复制粘贴, 下载文件 |
+///
+/// 注：以下 72 个函数已全局内置（无需 #引入），对标 Python builtins：
+/// 范围、枚举、配对、反转、排序、全真、任一真、映射、过滤、转布尔、
+/// 码转字、字转码、转二进制、转十六进制、商和余、
+/// 长度、文本包含、文本分割、头尾去空、判断数字、大写、小写、查找、计数、
+/// 开头判断、结尾判断、文本连接、文本重复、判断字母、判断小写、判断大写、
+/// 判断空白、首字母大写、大小写互换、左对齐、右对齐、居中、
+/// 转文本、转数字、转整数、转浮点、
+/// 绝对值、最大值、最小值、取整、幂运算、求和、向上取整、向下取整、平方根、随机数、
+/// 写文件、读文件、写、读、删除文件、删除文件夹、存在文件、存在文件夹、
+/// 存在文件或文件夹、文件后缀、文件头部、读文件行、文件夹列表、文件列表、
+/// 随机文件夹名、随机文件名、文件夹大小、文件大小、重命名、复制粘贴、下载文件
 pub struct StdLib;
 
 impl StdLib {
     /// 解析标准库模块，返回函数列表。未找到模块返回 None。
-    pub fn resolve(module: &str) -> Option<Vec<(&'static str, BuiltinFn)>> {
-        let funcs: Vec<(&str, BuiltinFn)> = match module {
-            "字符串" => vec![
-                ("长度", len_fn as BuiltinFn),
-                ("文本包含", contains_fn as BuiltinFn),
-                ("文本分割", split_fn as BuiltinFn),
-                ("头尾去空", trim_fn as BuiltinFn),
-                ("判断数字", is_number_fn as BuiltinFn),
-                ("大写", upper_fn as BuiltinFn),
-                ("小写", lower_fn as BuiltinFn),
-                ("查找", find_fn as BuiltinFn),
-                ("计数", count_sub_fn as BuiltinFn),
-                ("开头判断", starts_with_fn as BuiltinFn),
-                ("结尾判断", ends_with_fn as BuiltinFn),
-                ("文本连接", join_fn as BuiltinFn),
-                ("文本重复", repeat_fn as BuiltinFn),
-                // 字符串判断
-                ("判断字母", is_alpha_fn as BuiltinFn),
-                ("判断小写", is_lower_fn as BuiltinFn),
-                ("判断大写", is_upper_fn as BuiltinFn),
-                ("判断空白", is_space_fn as BuiltinFn),
-                // 字符串变形
-                ("首字母大写", title_fn as BuiltinFn),
-                ("大小写互换", swap_case_fn as BuiltinFn),
-                ("左对齐", ljust_fn as BuiltinFn),
-                ("右对齐", rjust_fn as BuiltinFn),
-                ("居中", center_fn as BuiltinFn),
-            ],
-            "数学" => vec![
-                ("绝对值", abs_fn as BuiltinFn),
-                ("最大值", max_fn as BuiltinFn),
-                ("最小值", min_fn as BuiltinFn),
-                ("取整", round_fn as BuiltinFn),
-                ("幂运算", pow_fn as BuiltinFn),
-                ("求和", sum_fn as BuiltinFn),
-                ("向上取整", ceil_fn as BuiltinFn),
-                ("向下取整", floor_fn as BuiltinFn),
-            ],
-            "类型" => vec![
-                ("转文本", to_string_fn as BuiltinFn),
-                ("转数字", to_number_fn as BuiltinFn),
-                ("转整数", to_int_fn as BuiltinFn),
-                ("转浮点", to_float_fn as BuiltinFn),
-            ],
-            "访问" => vec![
-                ("创建访问", create_access_fn as BuiltinFn),
-                ("切换GET", change_get_fn as BuiltinFn),
-                ("切换POST", change_post_fn as BuiltinFn),
-                ("POST", request_post_fn as BuiltinFn),
-                ("POST文件", request_post_file_fn as BuiltinFn),
-                ("启用跳转", enable_redirects_fn as BuiltinFn),
-                ("禁用跳转", disable_redirects_fn as BuiltinFn),
-                ("设置头部", set_headers_fn as BuiltinFn),
-                ("设置超时", set_timeout_fn as BuiltinFn),
-                ("发送", request_send_fn as BuiltinFn),
-                ("全部内容", request_all_content_fn as BuiltinFn),
-                ("内容", request_content_fn as BuiltinFn),
-            ],
-            "画布" => vec![
-                ("创建画布", canvas_new_fn as BuiltinFn),
-                ("画布.获取", canvas_get_fn as BuiltinFn),
-                ("画笔.设置颜色", canvas_brush_color_fn as BuiltinFn),
-                ("画笔.获取颜色", canvas_brush_get_color_fn as BuiltinFn),
-                ("画笔.大小", canvas_brush_size_fn as BuiltinFn),
-                ("绘制.点", canvas_draw_point_fn as BuiltinFn),
-                ("绘制.线", canvas_draw_line_fn as BuiltinFn),
-                ("绘制.喷漆", canvas_brush_line_fn as BuiltinFn),
-                ("绘制.波浪", canvas_wave_line_fn as BuiltinFn),
-                ("绘制.油漆桶", canvas_flood_fill_fn as BuiltinFn),
-                ("绘制.方形", canvas_draw_rect_fill_fn as BuiltinFn),
-                ("绘制.方形描边", canvas_draw_rect_stroke_fn as BuiltinFn),
-                ("绘制.椭圆", canvas_draw_ellipse_fill_fn as BuiltinFn),
-                ("绘制.椭圆描边", canvas_draw_ellipse_stroke_fn as BuiltinFn),
-                ("绘制.圆形", canvas_draw_pie_fill_fn as BuiltinFn),
-                ("绘制.圆形描边", canvas_draw_pie_stroke_fn as BuiltinFn),
-                ("绘制.多边形", canvas_polygon_fn as BuiltinFn),
-                ("绘制.多边形描边", canvas_polygon_stroke_fn as BuiltinFn),
-                ("绘制.圆弧", canvas_draw_arc_fn as BuiltinFn),
-                ("绘制.图片", canvas_draw_image_fn as BuiltinFn),
-                ("绘制.文本", canvas_draw_text_fn as BuiltinFn),
-                ("绘制.随机点", canvas_random_dots_fn as BuiltinFn),
-                ("绘制.随机线条", canvas_random_lines_fn as BuiltinFn),
-                ("画布.灰度", canvas_grayscale_fn as BuiltinFn),
-                ("画布.马赛克", canvas_mosaic_all_fn as BuiltinFn),
-                ("绘制.马赛克", canvas_draw_mosaic_fn as BuiltinFn),
-                ("绘制.高斯模糊", canvas_draw_blur_fn as BuiltinFn),
-                ("画布.旋转", canvas_rotate_fn as BuiltinFn),
-                ("画布.圆形", canvas_round_corners_fn as BuiltinFn),
-            ],
-            "文件" => vec![
-                ("写文件", write_string_file_fn as BuiltinFn),
-                ("读文件", read_string_file_fn as BuiltinFn),
-                ("写", write_key_string_file_fn as BuiltinFn),
-                ("读", read_key_string_file_fn as BuiltinFn),
-                ("删除文件", delete_file_fn as BuiltinFn),
-                ("删除文件夹", delete_dir_fn as BuiltinFn),
-                ("存在文件", file_exist_fn as BuiltinFn),
-                ("存在文件夹", dir_exist_fn as BuiltinFn),
-                ("存在文件或文件夹", file_or_dir_exist_fn as BuiltinFn),
-                ("文件后缀", file_suffix_fn as BuiltinFn),
-                ("读文件行", read_file_lines_fn as BuiltinFn),
-                ("文件夹列表", dir_list_fn as BuiltinFn),
-                ("文件列表", file_list_fn as BuiltinFn),
-                ("随机文件夹名", random_dir_name_fn as BuiltinFn),
-                ("随机文件名", random_file_name_fn as BuiltinFn),
-                ("文件夹大小", dir_size_fn as BuiltinFn),
-                ("文件大小", file_size_fn as BuiltinFn),
-                ("重命名", file_rename_fn as BuiltinFn),
-                ("复制粘贴", file_copy_fn as BuiltinFn),
-                ("下载文件", download_file_fn as BuiltinFn),
-            ],
-            _ => return None,
-        };
-        Some(funcs)
+    pub fn resolve(_module: &str) -> Option<Vec<(&'static str, BuiltinFn)>> {
+        None
     }
 
     /// 将标准库模块的函数注册到 builtins 表。
@@ -238,9 +360,10 @@ pub fn is_stdlib_package(bv: &BuildValue) -> Option<&str> {
 
 /// 注册所有内置函数到上下文的 builtins 表
 pub fn register_builtins(ctx: &mut DicContext) {
-    // ===== 引擎核心函数（始终可用，无需 #引入=）=====
     let shared = Arc::make_mut(&mut ctx.shared);
     let builtins = Arc::make_mut(&mut shared.builtins);
+
+    // ===== 引擎核心函数（始终可用，无需 #引入=）=====
     builtins.insert("回调".to_string(), callback_fn);
     builtins.insert("主回调".to_string(), main_callback_fn);
     builtins.insert("打印".to_string(), print_fn);
@@ -250,122 +373,128 @@ pub fn register_builtins(ctx: &mut DicContext) {
     builtins.insert("替换".to_string(), replace_fn);
     builtins.insert("删前缀".to_string(), trim_prefix_fn);
     builtins.insert("删后缀".to_string(), trim_suffix_fn);
-    builtins.insert("new".to_string(), new_fn);
     builtins.insert("访问".to_string(), access_get_fn);
     builtins.insert("访问POST".to_string(), access_post_fn);
     builtins.insert("访问转发".to_string(), request_forward_fn);
-}
 
-/// new 类名$ — 创建面对像实例，返回类名
-/// 支持 $new 类名$（当前文件或已加载包）和 $new 包名.类名$（指定包）
-fn new_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let class_name = args.get(1).map(|s| s.as_str()).unwrap_or("");
-    if class_name.is_empty() {
-        return Some(format!("[错误] {} $new 需要类名", ctx.sys.file_location()));
-    }
-    // 解析：支持 "pkg.Class" 和 "Class" 两种格式
-    let (pkg_target, pure_class) = if let Some(dot_pos) = class_name.find('.') {
-        (Some(&class_name[..dot_pos]), &class_name[dot_pos + 1..])
-    } else {
-        (None, class_name)
-    };
-    let constructor_keys: [String; 2] = [
-        format!("{}.new", pure_class),
-        format!("{}.初始化", pure_class),
-    ];
-    // 在 BuildValue 的 local_func 中线性搜索
-    let find_in_bv = |bv: &BuildValue, key: &str| -> Option<Vec<String>> {
-        bv.local_func.iter().find(|d| d.trigger == key).map(|d| d.text.clone())
-    };
-    // 搜索构造函数：当前文件 → 指定包 → 所有包
-    let mut found_code: Option<Vec<String>> = None;
-    let mut found_pkg: Option<String> = None;
-    for ck in &constructor_keys {
-        if let Some(code) = ctx.find_internal(ck) {
-            found_code = Some(code);
-            break;
-        }
-    }
-    if found_code.is_none() {
-        if let Some(pkg) = pkg_target {
-            if let Some(bv) = ctx.shared.packages.get(pkg) {
-                for ck in &constructor_keys {
-                    if let Some(code) = find_in_bv(bv, ck) {
-                        found_code = Some(code);
-                        found_pkg = Some(pkg.to_string());
-                        break;
-                    }
-                }
-            }
-            if found_code.is_none() {
-                return Some(format!("[错误] {} 包 '{}' 中没有类 '{}'", ctx.sys.file_location(), pkg, pure_class));
-            }
-        }
-    }
-    if found_code.is_none() && pkg_target.is_none() {
-        for (pkg_name, bv) in ctx.shared.packages.iter() {
-            for ck in &constructor_keys {
-                if let Some(code) = find_in_bv(bv, ck) {
-                    found_code = Some(code);
-                    found_pkg = Some(pkg_name.clone());
-                    break;
-                }
-            }
-            if found_code.is_some() {
-                break;
-            }
-        }
-    }
-    if let Some(code) = found_code {
-        let ck_used = constructor_keys.iter().find(|k| {
-            if let Some(ref p) = found_pkg {
-                ctx.shared.packages.get(p)
-                    .map(|bv| find_in_bv(bv, k).is_some())
-                    .unwrap_or(false)
-            } else {
-                ctx.find_internal(k).is_some()
-            }
-        });
-        let mut sub_ctx = if let Some(ref pkg_name) = found_pkg {
-            let mut sc = ctx.clone_for_internal();
-            let sc_shared = Arc::make_mut(&mut sc.shared);
-            if let Some(bv) = ctx.shared.packages.get(pkg_name) {
-                sc_shared.triggers = bv.dic.clone();
-                sc_shared.local_static = bv.local_static.clone();
-                sc_shared.local_func = bv.local_func.clone();
-            }
-            sc.rebuild_internal_maps();
-            sc
-        } else {
-            ctx.fresh_sub_context()
-        };
-        sub_ctx.val.p.set_string("_", class_name.to_string());
-        sub_ctx.val.p.set_string("触发", ck_used.cloned().unwrap_or_default());
-        for (i, arg) in args.iter().skip(2).enumerate() {
-            sub_ctx.val.p
-                .set_string(&format!("参数{}", i + 1), ctx.val.text(arg));
-        }
-        entry(&mut sub_ctx, &code);
-        let instance_id = format!("{}@{}", class_name, next_instance_id());
-        // 实例变量存储：同时用变量名和实例 ID 作为前缀
-        let target_var = ctx.val.p.get_cloned("_target");
-        for (key, val) in sub_ctx.val.p.obj.iter() {
-            if let Some(field) = key.strip_prefix('.') {
-                // 变量名前缀（如 a.count）
-                if !target_var.is_empty() {
-                    ctx.val.p.set_string(&format!("{}.{}", target_var, field), val.display());
-                }
-                // 实例 ID 前缀（如 Counter@0.count），用于函数传参时查找
-                ctx.val.p.set_string(&format!("{}.{}", instance_id, field), val.display());
-            }
-        }
-        let output = sub_ctx.output.get();
-        if !output.is_empty() {
-            println!("{}", crate::analyzer::unescape_newline(&output));
-        }
-        return Some(instance_id);
-    }
-    Some(class_name.to_string())
+    // ===== 内置基础函数（对标 Python builtins，始终可用）=====
+    builtins.insert("范围".to_string(), range_fn);
+    builtins.insert("枚举".to_string(), enumerate_fn);
+    builtins.insert("配对".to_string(), zip_fn);
+    builtins.insert("反转".to_string(), reversed_fn);
+    builtins.insert("排序".to_string(), sorted_fn);
+    builtins.insert("全真".to_string(), all_fn);
+    builtins.insert("任一真".to_string(), any_fn);
+    builtins.insert("映射".to_string(), map_fn);
+    builtins.insert("过滤".to_string(), filter_fn);
+    builtins.insert("转布尔".to_string(), to_bool_fn);
+    builtins.insert("码转字".to_string(), chr_fn);
+    builtins.insert("字转码".to_string(), ord_fn);
+    builtins.insert("转二进制".to_string(), bin_fn);
+    builtins.insert("转十六进制".to_string(), hex_fn);
+    builtins.insert("商和余".to_string(), divmod_fn);
+    builtins.insert("长度".to_string(), len_fn);
+    builtins.insert("文本包含".to_string(), contains_fn);
+    builtins.insert("文本分割".to_string(), split_fn);
+    builtins.insert("头尾去空".to_string(), trim_fn);
+    builtins.insert("判断数字".to_string(), is_number_fn);
+    builtins.insert("大写".to_string(), upper_fn);
+    builtins.insert("小写".to_string(), lower_fn);
+    builtins.insert("查找".to_string(), find_fn);
+    builtins.insert("计数".to_string(), count_sub_fn);
+    builtins.insert("开头判断".to_string(), starts_with_fn);
+    builtins.insert("结尾判断".to_string(), ends_with_fn);
+    builtins.insert("文本连接".to_string(), join_fn);
+    builtins.insert("文本重复".to_string(), repeat_fn);
+    builtins.insert("判断字母".to_string(), is_alpha_fn);
+    builtins.insert("判断小写".to_string(), is_lower_fn);
+    builtins.insert("判断大写".to_string(), is_upper_fn);
+    builtins.insert("判断空白".to_string(), is_space_fn);
+    builtins.insert("首字母大写".to_string(), title_fn);
+    builtins.insert("大小写互换".to_string(), swap_case_fn);
+    builtins.insert("左对齐".to_string(), ljust_fn);
+    builtins.insert("右对齐".to_string(), rjust_fn);
+    builtins.insert("居中".to_string(), center_fn);
+    builtins.insert("转文本".to_string(), to_string_fn);
+    builtins.insert("转数字".to_string(), to_number_fn);
+    builtins.insert("转整数".to_string(), to_int_fn);
+    builtins.insert("转浮点".to_string(), to_float_fn);
+    builtins.insert("绝对值".to_string(), abs_fn);
+    builtins.insert("最大值".to_string(), max_fn);
+    builtins.insert("最小值".to_string(), min_fn);
+    builtins.insert("取整".to_string(), round_fn);
+    builtins.insert("幂运算".to_string(), pow_fn);
+    builtins.insert("求和".to_string(), sum_fn);
+    builtins.insert("向上取整".to_string(), ceil_fn);
+    builtins.insert("向下取整".to_string(), floor_fn);
+    builtins.insert("平方根".to_string(), sqrt_fn);
+    builtins.insert("随机数".to_string(), random_fn);
+    builtins.insert("写文件".to_string(), write_string_file_fn);
+    builtins.insert("读文件".to_string(), read_string_file_fn);
+    builtins.insert("写".to_string(), write_key_string_file_fn);
+    builtins.insert("读".to_string(), read_key_string_file_fn);
+    builtins.insert("删除文件".to_string(), delete_file_fn);
+    builtins.insert("删除文件夹".to_string(), delete_dir_fn);
+    builtins.insert("存在文件".to_string(), file_exist_fn);
+    builtins.insert("存在文件夹".to_string(), dir_exist_fn);
+    builtins.insert("存在文件或文件夹".to_string(), file_or_dir_exist_fn);
+    builtins.insert("文件后缀".to_string(), file_suffix_fn);
+    builtins.insert("文件头部".to_string(), file_header_fn);
+    builtins.insert("读文件行".to_string(), read_file_lines_fn);
+    builtins.insert("文件夹列表".to_string(), dir_list_fn);
+    builtins.insert("文件列表".to_string(), file_list_fn);
+    builtins.insert("随机文件夹名".to_string(), random_dir_name_fn);
+    builtins.insert("随机文件名".to_string(), random_file_name_fn);
+    builtins.insert("文件夹大小".to_string(), dir_size_fn);
+    builtins.insert("文件大小".to_string(), file_size_fn);
+    builtins.insert("重命名".to_string(), file_rename_fn);
+    builtins.insert("复制粘贴".to_string(), file_copy_fn);
+    builtins.insert("下载文件".to_string(), download_file_fn);
+
+    // ===== 访问（HTTP 客户端）=====
+    builtins.insert("创建访问".to_string(), create_access_fn);
+    builtins.insert("切换GET".to_string(), change_get_fn);
+    builtins.insert("切换POST".to_string(), change_post_fn);
+    builtins.insert("POST".to_string(), request_post_fn);
+    builtins.insert("POST文件".to_string(), request_post_file_fn);
+    builtins.insert("启用跳转".to_string(), enable_redirects_fn);
+    builtins.insert("禁用跳转".to_string(), disable_redirects_fn);
+    builtins.insert("设置头部".to_string(), set_headers_fn);
+    builtins.insert("设置超时".to_string(), set_timeout_fn);
+    builtins.insert("发送".to_string(), request_send_fn);
+    builtins.insert("全部内容".to_string(), request_all_content_fn);
+    builtins.insert("内容".to_string(), request_content_fn);
+
+    // ===== 画布 =====
+    builtins.insert("创建画布".to_string(), canvas_new_fn);
+    builtins.insert("画布获取".to_string(), canvas_get_fn);
+    builtins.insert("画笔设置颜色".to_string(), canvas_brush_color_fn);
+    builtins.insert("画笔获取颜色".to_string(), canvas_brush_get_color_fn);
+    builtins.insert("画笔大小".to_string(), canvas_brush_size_fn);
+    builtins.insert("绘制点".to_string(), canvas_draw_point_fn);
+    builtins.insert("绘制线".to_string(), canvas_draw_line_fn);
+    builtins.insert("绘制喷漆".to_string(), canvas_brush_line_fn);
+    builtins.insert("绘制波浪".to_string(), canvas_wave_line_fn);
+    builtins.insert("绘制油漆桶".to_string(), canvas_flood_fill_fn);
+    builtins.insert("绘制方形".to_string(), canvas_draw_rect_fill_fn);
+    builtins.insert("绘制方形描边".to_string(), canvas_draw_rect_stroke_fn);
+    builtins.insert("绘制椭圆".to_string(), canvas_draw_ellipse_fill_fn);
+    builtins.insert("绘制椭圆描边".to_string(), canvas_draw_ellipse_stroke_fn);
+    builtins.insert("绘制圆形".to_string(), canvas_draw_pie_fill_fn);
+    builtins.insert("绘制圆形描边".to_string(), canvas_draw_pie_stroke_fn);
+    builtins.insert("绘制多边形".to_string(), canvas_polygon_fn);
+    builtins.insert("绘制多边形描边".to_string(), canvas_polygon_stroke_fn);
+    builtins.insert("绘制圆弧".to_string(), canvas_draw_arc_fn);
+    builtins.insert("绘制图片".to_string(), canvas_draw_image_fn);
+    builtins.insert("绘制文本".to_string(), canvas_draw_text_fn);
+    builtins.insert("绘制随机点".to_string(), canvas_random_dots_fn);
+    builtins.insert("绘制随机线条".to_string(), canvas_random_lines_fn);
+    builtins.insert("画布灰度".to_string(), canvas_grayscale_fn);
+    builtins.insert("画布马赛克".to_string(), canvas_mosaic_all_fn);
+    builtins.insert("绘制马赛克".to_string(), canvas_draw_mosaic_fn);
+    builtins.insert("绘制高斯模糊".to_string(), canvas_draw_blur_fn);
+    builtins.insert("画布旋转".to_string(), canvas_rotate_fn);
+    builtins.insert("画布圆形".to_string(), canvas_round_corners_fn);
 }
 
 /// 以 swap 共享变量池方式执行子调用，变更直接作用到父级
@@ -382,7 +511,7 @@ fn run_with_shared_val(
         sub_ctx.val.p.set_string(name, val.clone());
         sub_ctx.val.p.set_string(&format!("参数{}", i), val.clone());
     }
-    sub_ctx.val.p.set_string("_", target.to_string());
+    sub_ctx.val.p.set_string("self", target.to_string());
     sub_ctx.val.p.set_string("触发", target.to_string());
     sub_ctx.sys.external_labels = ctx.sys.external_labels
         .iter()
@@ -415,8 +544,8 @@ fn callback_fn(ctx: &mut DicContext, _args: &[String], content: &str) -> Option<
     };
     let target = after_callback.trim_start();
 
-    // 类作用域查找：_ 变量为类名时，先查 ClassName.target，再回退到 target
-    let class_name_raw = ctx.val.p.get_cloned("_");
+    // 类作用域查找：self 变量为类名时，先查 ClassName.target，再回退到 target
+    let class_name_raw = ctx.val.p.get_cloned("self");
     let class_name = class_name_raw.rfind('.').map(|p| &class_name_raw[p+1..]).unwrap_or(&class_name_raw);
     let class_name = class_name.rfind('@').map(|p| &class_name[..p]).unwrap_or(class_name);
     let found = if !class_name.is_empty() {
@@ -624,7 +753,7 @@ fn server_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
                 req_ctx.val.p.set_string("_设置头部", "{}".to_string());
                 req_ctx.val.p.set_string("_状态码", "200".to_string());
                 if let Some(ref name) = handler_name {
-                    req_ctx.val.p.set_string("_", name.clone());
+                    req_ctx.val.p.set_string("self", name.clone());
                 }
                 entry(&mut req_ctx, code);
                 if !Arc::ptr_eq(&base_ctx.shared, &req_ctx.shared) {
@@ -735,7 +864,7 @@ fn handle_tcp_request(
         req_ctx.val.p.set_string("触发", trigger.to_string());
         req_ctx.val.p.set_string("触发响应", String::new());
         if let Some(ref name) = handler_name {
-            req_ctx.val.p.set_string("_", name.clone());
+            req_ctx.val.p.set_string("self", name.clone());
         }
         entry(&mut req_ctx, code);
         if !Arc::ptr_eq(&base_ctx.shared, &req_ctx.shared) {
@@ -1155,7 +1284,7 @@ fn request_send_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opt
 
         let status_code = resp.status().as_u16();
         let headers: HashMap<String, String> = resp.headers().iter()
-            .map(|(name, val)| (name.to_string(), val.to_str().unwrap_or("").to_string()))
+            .map(|(name, val)| (name.to_string(), String::from_utf8_lossy(val.as_bytes()).to_string()))
             .collect();
 
         let mut data = Vec::new();
@@ -1428,7 +1557,7 @@ fn request_forward_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> 
 /// 获取请求句柄和参数起始偏移（OOP 兼容）
 /// 返回 (handle, data_start_index)
 /// - 显式句柄模式：args[1] 是句柄 → data_start=2
-/// - OOP 模式：句柄来自 _ 变量 → data_start=1
+/// - OOP 模式：句柄来自 self 变量 → data_start=1
 fn get_req_handle_and_offset(ctx: &mut DicContext, args: &[String]) -> (String, usize) {
     if let Some(h) = args.get(1) {
         let h = ctx.val.text(h);
@@ -1436,7 +1565,7 @@ fn get_req_handle_and_offset(ctx: &mut DicContext, args: &[String]) -> (String, 
             return (h, 2);
         }
     }
-    let handle = ctx.val.p.get_cloned("_");
+    let handle = ctx.val.p.get_cloned("self");
     (handle, 1)
 }
 
@@ -1669,34 +1798,38 @@ fn repeat_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
 
 // ==================== 字符串判断函数 ====================
 
+fn str_predicate_fn(ctx: &mut DicContext, args: &[String], pred: impl FnOnce(&str) -> bool) -> Option<String> {
+    let s = ctx.val.text(&args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
+    let result = pred(&s);
+    Some(if result { "1".to_string() } else { String::new() })
+}
+
 /// 判断是否全为 ASCII 字母 (A-Z a-z)，非空
 fn is_alpha_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let s = ctx.val.text(&args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
-    let result = !s.is_empty() && s.chars().all(|c| c.is_ascii_alphabetic());
-    Some(if result { "1".to_string() } else { String::new() })
+    str_predicate_fn(ctx, args, |s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphabetic()))
 }
 
 /// Python str.islower()
 fn is_lower_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let s = ctx.val.text(&args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
-    let has_cased = s.chars().any(|c| c.is_alphabetic() && c.is_lowercase());
-    let all_lower = s.chars().all(|c| !c.is_alphabetic() || c.is_lowercase());
-    Some(if has_cased && all_lower { "1".to_string() } else { String::new() })
+    str_predicate_fn(ctx, args, |s| {
+        let has_cased = s.chars().any(|c| c.is_alphabetic() && c.is_lowercase());
+        let all_lower = s.chars().all(|c| !c.is_alphabetic() || c.is_lowercase());
+        has_cased && all_lower
+    })
 }
 
 /// Python str.isupper()
 fn is_upper_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let s = ctx.val.text(&args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
-    let has_cased = s.chars().any(|c| c.is_alphabetic() && c.is_uppercase());
-    let all_upper = s.chars().all(|c| !c.is_alphabetic() || c.is_uppercase());
-    Some(if has_cased && all_upper { "1".to_string() } else { String::new() })
+    str_predicate_fn(ctx, args, |s| {
+        let has_cased = s.chars().any(|c| c.is_alphabetic() && c.is_uppercase());
+        let all_upper = s.chars().all(|c| !c.is_alphabetic() || c.is_uppercase());
+        has_cased && all_upper
+    })
 }
 
 /// Python str.isspace() — 空字符串返回 "1"
 fn is_space_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let s = ctx.val.text(&args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
-    let result = s.is_empty() || s.chars().all(|c| c.is_whitespace());
-    Some(if result { "1".to_string() } else { String::new() })
+    str_predicate_fn(ctx, args, |s| s.is_empty() || s.chars().all(|c| c.is_whitespace()))
 }
 
 // ==================== 字符串变形函数 ====================
@@ -1817,20 +1950,43 @@ fn sum_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Strin
     }
 }
 
-/// Python math.ceil(x) — 向上取整
-fn ceil_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+fn math_unary_fn(ctx: &mut DicContext, args: &[String], op: fn(f64) -> f64) -> Option<String> {
     let text = ctx.val.text(&args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
     let n: f64 = text.trim().parse::<f64>().unwrap_or(0.0);
-    let v = n.ceil();
-    Some(format_f64(v))
+    Some(format_f64(op(n)))
+}
+
+/// Python math.ceil(x) — 向上取整
+fn ceil_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    math_unary_fn(ctx, args, f64::ceil)
 }
 
 /// Python math.floor(x) — 向下取整
 fn floor_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let text = ctx.val.text(&args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
+    math_unary_fn(ctx, args, f64::floor)
+}
+
+/// Python math.sqrt(x) — 返回平方根
+fn sqrt_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let text = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let n: f64 = text.trim().parse::<f64>().unwrap_or(0.0);
-    let v = n.floor();
-    Some(format_f64(v))
+    if n < 0.0 {
+        return Some(String::new());
+    }
+    Some(format_f64(n.sqrt()))
+}
+
+/// 返回 0..max 的随机整数；不传参数则返回 0..1 的随机浮点数
+fn random_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let max_str = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    if max_str.is_empty() {
+        // 返回 0~1 之间的随机浮点数
+        let r = simple_rand(1_000_000) as f64 / 1_000_000.0;
+        Some(format_f64(r))
+    } else {
+        let max = resolve_num(ctx, &max_str).unwrap_or(100);
+        Some(simple_rand(max).to_string())
+    }
 }
 
 // ==================== @画布 模块 ====================
@@ -2409,6 +2565,70 @@ fn file_suffix_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
         .map(|e| format!(".{}", e.to_string_lossy()))
         .unwrap_or_default();
     Some(ext)
+}
+
+/// $文件头部 路径或后缀$ — 根据文件后缀返回 Content-Type 头部
+fn file_header_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let ext = std::path::Path::new(&path)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| path.trim_start_matches('.').to_lowercase());
+
+    let mime = match ext.as_str() {
+        // 文本类
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "application/javascript; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "xml" => "application/xml; charset=utf-8",
+        "txt" | "text" => "text/plain; charset=utf-8",
+        "csv" => "text/csv; charset=utf-8",
+        "md" | "markdown" => "text/markdown; charset=utf-8",
+        "yaml" | "yml" => "text/yaml; charset=utf-8",
+        "toml" => "application/toml; charset=utf-8",
+        // 图片类
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "tiff" | "tif" => "image/tiff",
+        // 字体类
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "eot" => "application/vnd.ms-fontobject",
+        // 音视频类
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "flac" => "audio/flac",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "avi" => "video/x-msvideo",
+        // 文档类
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "tar" => "application/x-tar",
+        "gz" => "application/gzip",
+        "bz2" => "application/x-bzip2",
+        "7z" => "application/x-7z-compressed",
+        "rar" => "application/vnd.rar",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        // 其他
+        "wasm" => "application/wasm",
+        _ => "application/octet-stream",
+    };
+    Some(mime.to_string())
 }
 
 /// 简易伪随机数生成器（无需外部依赖，对标 Go utils.RandNum）

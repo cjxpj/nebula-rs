@@ -133,15 +133,19 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
 
         // 头部处理
         if runhead {
-            if line.contains("#引入=") {
-                // 格式: var:#引入=path  或  #引入=path 或 #引入=path1,path2...（批量）
-                let (pkg_name, path) = if let Some(colon_pos) = line.find(":#引入=") {
+            if line.starts_with("#引入*=") || line.contains("#引入=") {
+                let is_star = line.starts_with("#引入*=");
+                // 格式: var:#引入=path / #引入=path / #引入*=path / #引入=path1,path2...
+                let (pkg_name, path) = if is_star {
+                    let p = line.strip_prefix("#引入*=").unwrap_or("").trim();
+                    (String::new(), p.to_string())
+                } else if let Some(colon_pos) = line.find(":#引入=") {
                     let name = line[..colon_pos].trim().to_string();
                     let p = line[colon_pos..].strip_prefix(":#引入=").unwrap_or("").trim();
-                    (name, p)
+                    (name, p.to_string())
                 } else if line.starts_with("#引入=") {
                     let p = line.strip_prefix("#引入=").unwrap_or("").trim();
-                    (String::new(), p)
+                    (String::new(), p.to_string())
                 } else {
                     runheadtext.push(line);
                     continue;
@@ -155,6 +159,10 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
                 if !pkg_name.is_empty() && paths.len() > 1 {
                     return Err(format!("[错误] {} 第{}行: 带变量名的引入不支持批量（#引入={}）", _dic_path, dic_i + 1, path));
                 }
+                // 星引入不支持 var:#引入*=path 语法
+                if is_star && !pkg_name.is_empty() {
+                    return Err(format!("[错误] {} 第{}行: 星引入暂不支持设置别名（#引入*={}）", _dic_path, dic_i + 1, path));
+                }
 
                 for single_path in &paths {
                 // 检测自己引入自己（路径相对于工作目录）
@@ -166,24 +174,38 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
                             let tgt = std::path::Path::new(single_path);
                             if let Ok(tgt_canon) = tgt.canonicalize() {
                                 if cur_canon == tgt_canon || (tgt_canon.is_dir() && cur_canon.starts_with(&tgt_canon)) {
-                                    return Err(format!("[错误] {} 第{}行: 不能引入自己（#引入={}）", _dic_path, dic_i + 1, single_path));
+                                    let prefix = if is_star { "#引入*" } else { "#引入" };
+                                    return Err(format!("[错误] {} 第{}行: 不能引入自己（{}=）", _dic_path, dic_i + 1, prefix));
                                 }
                             }
                         }
                     }
                 }
 
-                // 标准库引入：@模块名 → 创建标记包（带缓存）
+                // 检查 @ 路径是否指向 embed 文件夹
                 let merged = if crate::functions::is_stdlib_path(single_path) {
                     let module = &single_path[1..]; // 去掉 @
                     if module.is_empty() {
-                        return Err(format!("[错误] {} 第{}行: 标准库模块名不能为空（#引入={}）", _dic_path, dic_i + 1, single_path));
+                        return Err(format!("[错误] {} 第{}行: 模块名不能为空（#引入={}）", _dic_path, dic_i + 1, single_path));
                     }
-                    if crate::functions::StdLib::resolve(module).is_none() {
-                        return Err(format!("[错误] {} 第{}行: 标准库模块不存在：{}（#引入={}）", _dic_path, dic_i + 1, module, single_path));
-                    }
-                    let cache_key = format!("@{}", module);
-                    {
+                    let embed_dir = format!("embed/{}", module);
+                    let embed_path = std::path::Path::new(&embed_dir);
+                    if embed_path.is_dir() {
+                        let cache_key = match embed_path.canonicalize() {
+                            Ok(p) => p.to_string_lossy().to_string(),
+                            Err(_) => embed_dir.clone(),
+                        };
+                        let mut cache = parse_cache().lock().unwrap();
+                        if let Some(cached) = cache.get(&cache_key) {
+                            Some(cached.clone())
+                        } else {
+                            let mut full = merge_dir_package(&embed_dir)?;
+                            full.stdlib_module = Some(module.to_string());
+                            cache.insert(cache_key, full.clone());
+                            Some(full)
+                        }
+                    } else if crate::functions::StdLib::resolve(module).is_some() {
+                        let cache_key = format!("@{}", module);
                         let mut cache = parse_cache().lock().unwrap();
                         if let Some(cached) = cache.get(&cache_key) {
                             Some(cached.clone())
@@ -192,44 +214,80 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
                             cache.insert(cache_key, pkg.clone());
                             Some(pkg)
                         }
+                    } else {
+                        return Err(format!("[错误] {} 第{}行: 模块不存在：{}（#引入={}）", _dic_path, dic_i + 1, module, single_path));
                     }
                 } else {
-                    // 先检测是否为文件夹，是则加载文件夹下所有 .nr 文件（带缓存）
+                    // 先检测是否为文件夹
                     let dir_path = std::path::Path::new(single_path);
                     if dir_path.is_dir() {
-                        let cache_key = match std::path::Path::new(single_path).canonicalize() {
-                            Ok(p) => p.to_string_lossy().to_string(),
-                            Err(_) => single_path.to_string(),
-                        };
-                        {
-                             let mut cache = parse_cache().lock().unwrap();
-                             if let Some(cached) = cache.get(&cache_key) {
-                                 let mut merged_bv = cached.clone();
-                                 merged_bv.head.clear();
-                                 Some(merged_bv)
-                             } else {
-                                 let full = merge_dir_package(single_path)?;
-                                 cache.insert(cache_key, full.clone());
-                                 let mut merged_bv = full;
-                                 merged_bv.head.clear();
-                                 Some(merged_bv)
+                        // 优先加载 main.nr 作为主文件
+                        let main_nr = dir_path.join("main.nr");
+                        if main_nr.exists() {
+                            let main_nr_str = main_nr.to_string_lossy().to_string();
+                            let cache_key = match main_nr.canonicalize() {
+                                Ok(p) => p.to_string_lossy().to_string(),
+                                Err(_) => main_nr_str.clone(),
+                            };
+                            {
+                                let cache = parse_cache().lock().unwrap();
+                                if let Some(cached) = cache.get(&cache_key) {
+                                    Some(cached.clone())
+                                } else {
+                                    drop(cache);
+                                    let data = file_lock::with_file_read(&main_nr, || {
+                                        fs::read_to_string(&main_nr)
+                                            .map_err(|e| format!("[错误] 无法读取文件 '{}': {}", main_nr_str, e))
+                                    })?;
+                                    let parsed = build_dic(&main_nr_str, &data)?;
+                                    let mut cache = parse_cache().lock().unwrap();
+                                    cache.insert(cache_key, parsed.clone());
+                                    Some(parsed)
+                                }
+                            }
+                        } else {
+                            // 无 main.nr，合并目录下所有 .nr 文件（带缓存）
+                            let cache_key = match std::path::Path::new(single_path).canonicalize() {
+                                Ok(p) => p.to_string_lossy().to_string(),
+                                Err(_) => single_path.to_string(),
+                            };
+                            {
+                                 let mut cache = parse_cache().lock().unwrap();
+                                 if let Some(cached) = cache.get(&cache_key) {
+                                     let mut merged_bv = cached.clone();
+                                     merged_bv.head.clear();
+                                     Some(merged_bv)
+                                 } else {
+                                     let full = merge_dir_package(single_path)?;
+                                     cache.insert(cache_key, full.clone());
+                                     let mut merged_bv = full;
+                                     merged_bv.head.clear();
+                                     Some(merged_bv)
+                                 }
                              }
-                         }
-                    } else {
-                        // 不是文件夹，则必须为 .nr 文件（带缓存）
-                        if !single_path.ends_with(".nr") {
-                            return Err(format!("[错误] {} 第{}行: 引入文件必须为 .nr 后缀：{}（#引入={}）", _dic_path, dic_i + 1, single_path, single_path));
                         }
-                        let cache_key = match std::path::Path::new(single_path).canonicalize() {
+                    } else {
+                        // 不是文件夹，则必须为 .nr 文件（自动补充 .nr 后缀）
+                        let final_path = if single_path.ends_with(".nr") {
+                            single_path.to_string()
+                        } else {
+                            let try_nr = format!("{}.nr", single_path);
+                            if std::path::Path::new(&try_nr).exists() {
+                                try_nr
+                            } else {
+                                return Err(format!("[错误] {} 第{}行: 引入文件不存在：{}（#引入={}）", _dic_path, dic_i + 1, try_nr, single_path));
+                            }
+                        };
+                        let cache_key = match std::path::Path::new(&final_path).canonicalize() {
                             Ok(p) => p.to_string_lossy().to_string(),
-                            Err(_) => single_path.to_string(),
+                            Err(_) => final_path.clone(),
                         };
                         {
                             let mut cache = parse_cache().lock().unwrap();
                             if let Some(cached) = cache.get(&cache_key) {
                                 Some(cached.clone())
                             } else {
-                                match file_lock::with_file_read(std::path::Path::new(single_path), || fs::read_to_string(single_path)) {
+                                match file_lock::with_file_read(std::path::Path::new(&final_path), || fs::read_to_string(&final_path)) {
                                     Ok(file_data) => {
                                         let parsed = build_dic(_dic_path, &file_data)?;
                                         cache.insert(cache_key, parsed.clone());
@@ -242,18 +300,13 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
                     }
                 };
                 if let Some(z) = merged {
-                    let is_stdlib = z.stdlib_module.is_some();
-                    if !pkg_name.is_empty() {
-                        // var:#引入=path —— 作为面对像包，剥离 . 前缀（.web 存为 web）
-                        let pkg_key = pkg_name.strip_prefix('.').unwrap_or(&pkg_name).to_string();
-                        packages.insert(pkg_key, z);
-                    } else if is_stdlib {
-                        // #引入=@模块名 —— 标准库无变量名时，以模块名作为包名存入 packages
-                        let module = z.stdlib_module.as_deref().unwrap_or("unknown");
-                        packages.insert(module.to_string(), z);
-                    } else {
-                        // #引入=path —— Python 风格：自动以文件名/目录名作为包名存入 packages
-                        let auto_name = if is_stdlib {
+                    if is_star {
+                        // 星引入：合并包内所有函数/词条到当前作用域
+                        chajian_text.extend(z.local_func.clone());
+                        func_text.extend(z.local_static.clone());
+                        dic_text.extend(z.dic.clone());
+                        // 同时保留命名空间访问（如 $test.函数$）
+                        let auto_name = if z.stdlib_module.is_some() {
                             z.stdlib_module.as_deref().unwrap_or("unknown").to_string()
                         } else {
                             let path_ref = std::path::Path::new(single_path);
@@ -269,10 +322,39 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
                                     .to_string()
                             }
                         };
-                        if packages.contains_key(&auto_name) {
-                            // 同名包已存在 → 跳过（幂等引入，类似 Python import 行为）
-                        } else {
+                        if !packages.contains_key(&auto_name) {
                             packages.insert(auto_name, z);
+                        }
+                    } else {
+                        let is_stdlib = z.stdlib_module.is_some();
+                        if !pkg_name.is_empty() {
+                            let pkg_key = pkg_name.strip_prefix('.').unwrap_or(&pkg_name).to_string();
+                            packages.insert(pkg_key, z);
+                        } else if is_stdlib {
+                            let module = z.stdlib_module.as_deref().unwrap_or("unknown");
+                            packages.insert(module.to_string(), z);
+                        } else {
+                            let auto_name = if is_stdlib {
+                                z.stdlib_module.as_deref().unwrap_or("unknown").to_string()
+                            } else {
+                                let path_ref = std::path::Path::new(single_path);
+                                if single_path.ends_with(".nr") {
+                                    path_ref.file_stem()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or(single_path)
+                                        .to_string()
+                                } else {
+                                    path_ref.file_name()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or(single_path)
+                                        .to_string()
+                                }
+                            };
+                            if packages.contains_key(&auto_name) {
+                                // 同名包已存在 → 跳过
+                            } else {
+                                packages.insert(auto_name, z);
+                            }
                         }
                     }
                 } else {

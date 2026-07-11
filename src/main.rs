@@ -64,7 +64,7 @@ fn run_repl(file_path: &str) -> Result<(), String> {
     let stdin = io::stdin();
     let mut input = String::new();
 
-    println!("Nebula REPL — 输入触发词，:q 退出，:func 调用函数");
+    println!("Nebula REPL");
     loop {
         print!(">>> ");
         io::stdout().flush().unwrap();
@@ -76,34 +76,12 @@ fn run_repl(file_path: &str) -> Result<(), String> {
         if line.is_empty() {
             continue;
         }
-        if line.starts_with(':') {
-            match line {
-                ":q" | ":quit" | ":exit" => break,
-                _ if line.starts_with(":func ") => {
-                    let func_name = &line[6..].trim();
-                    match nb.exec_func(func_name) {
-                        Ok(output) => {
-                            if !output.is_empty() {
-                                println!("{}", output);
-                            }
-                        }
-                        Err(e) => eprintln!("\x1b[31m{}\x1b[0m", e),
-                    }
-                    nb.ctx.output.clear();
-                }
-                _ => eprintln!("未知命令: {}（可用: :q :func）", line),
-            }
-        } else {
-            match nb.exec_trigger(line) {
-                Ok(output) => {
-                    if !output.is_empty() {
-                        println!("{}", output);
-                    }
-                }
-                Err(e) => eprintln!("\x1b[31m{}\x1b[0m", e),
-            }
-            nb.ctx.output.clear();
+        interpreter::entry(&mut nb.ctx, &[line.to_string()]);
+        let output = nb.ctx.output.get();
+        if !output.is_empty() {
+            println!("{}", output);
         }
+        nb.ctx.output.clear();
     }
     Ok(())
 }
@@ -118,7 +96,6 @@ fn main() {
     // 解析可选参数
     let mut check_update = false;
     let mut do_update = false;
-    let mut repo = String::new();
     let mut asset_filter = String::new();
     let mut interactive = false;
     let mut file_path: Option<&str> = None;
@@ -133,12 +110,6 @@ fn main() {
             }
             "--check-update" | "-c" => check_update = true,
             "--update" | "-u" => do_update = true,
-            "--repo" => {
-                i += 1;
-                if i < args.len() {
-                    repo = args[i].clone();
-                }
-            }
             "--asset" => {
                 i += 1;
                 if i < args.len() {
@@ -162,7 +133,7 @@ fn main() {
 
     // 更新相关命令优先处理
     if check_update {
-        let result = updater::run_check(&repo);
+        let result = updater::run_check();
         if let Err(e) = result {
             eprintln!("\x1b[31m{}\x1b[0m", e);
         }
@@ -170,7 +141,7 @@ fn main() {
     }
 
     if do_update {
-        let result = updater::run_update(&repo, &asset_filter);
+        let result = updater::run_update(&asset_filter);
         if let Err(e) = result {
             eprintln!("\x1b[31m{}\x1b[0m", e);
         }
@@ -210,7 +181,6 @@ fn print_help(exe_name: &str) {
     println!("  {} --update [-u]           下载并安装最新版本", exe_name);
     println!();
     println!("更新选项:");
-    println!("  --repo <owner/name>       指定 GitHub 仓库地址");
     println!("  --asset <关键词>          指定下载资源的匹配关键词");
     println!();
     println!("其他:");

@@ -1,6 +1,6 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿# 文件操作
+﻿﻿﻿﻿﻿﻿﻿﻿# 文件操作
 
-基础函数 | 共 22 个函数。使用 `#引入=@文件` 导入后可用。包含文件读写、存在性判断、列表遍历、删除、重命名、复制、下载等功能。
+基础函数 | 共 23 个函数。使用 `#引入=@文件` 导入后可用。包含文件读写、存在性判断、文件后缀与头部、列表遍历、删除、重命名、复制、下载等功能。
 
 ## 文件系统概述
 
@@ -142,6 +142,26 @@ $存在文件或文件夹 database/cache$
 ```
 $文件后缀 photo.jpg$             → ".jpg"
 ```
+
+<a id="file-header"></a>
+
+### `$文件头部$` — 获取文件 Content-Type
+
+- **格式**：`$文件头部 [路径或后缀]$`
+- **参数**：文件路径或文件后缀名（可含点号可不含）
+- **返回值**：对应的 Content-Type 字符串；未匹配时返回 "application/octet-stream"
+
+根据文件后缀名返回对应的 HTTP Content-Type 头部。既支持完整文件路径，也支持直接传后缀。
+
+```
+$文件头部 index.html$             → "text/html; charset=utf-8"
+$文件头部 style.css$              → "text/css; charset=utf-8"
+$文件头部 logo.png$               → "image/png"
+$文件头部 .jpg$                   → "image/jpeg"
+$文件头部 unknown.xyz$            → "application/octet-stream"
+```
+
+支持的后缀类型包括：html、css、js、json、xml、txt、csv、md、yaml、toml、png、jpg、jpeg、gif、svg、ico、webp、bmp、tiff、woff、woff2、ttf、otf、eot、mp3、wav、ogg、flac、mp4、webm、avi、pdf、zip、tar、gz、bz2、7z、rar、doc、docx、xls、xlsx、ppt、pptx、wasm 等。
 
 <a id="file-list-dirs"></a>
 

@@ -2,16 +2,15 @@ use std::io::Read;
 use crate::file_lock;
 
 /// 默认的 GitHub 仓库地址，格式: owner/name
-const DEFAULT_REPO: &str = "";
+const DEFAULT_REPO: &str = "cjxpj/nebula-rs";
 
 /// 当前程序版本（编译时从 Cargo.toml 获取）
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CURRENT_NAME: &str = env!("CARGO_PKG_NAME");
 
 /// 检测更新：查询 GitHub Releases 最新版本并与当前版本对比
-pub fn run_check(repo: &str) -> Result<(), String> {
-    let repo = resolve_repo(repo)?;
-    let latest = fetch_latest_release(repo)?;
+pub fn run_check() -> Result<(), String> {
+    let latest = fetch_latest_release(DEFAULT_REPO)?;
 
     if latest.tag != CURRENT_VERSION {
         println!("\x1b[33m=== 发现新版本! ===\x1b[0m");
@@ -36,9 +35,8 @@ pub fn run_check(repo: &str) -> Result<(), String> {
 }
 
 /// 执行更新：下载新版本并替换当前程序
-pub fn run_update(repo: &str, asset_filter: &str) -> Result<(), String> {
-    let repo = resolve_repo(repo)?;
-    let latest = fetch_latest_release(repo)?;
+pub fn run_update(asset_filter: &str) -> Result<(), String> {
+    let latest = fetch_latest_release(DEFAULT_REPO)?;
 
     if latest.tag == CURRENT_VERSION {
         println!("\x1b[32m已是最新版本 (v{})\x1b[0m", CURRENT_VERSION);
@@ -91,19 +89,6 @@ struct ReleaseInfo {
     tag: String,
     body: String,
     assets: Vec<(String, String)>, // (name, browser_download_url)
-}
-
-fn resolve_repo(repo: &str) -> Result<&str, String> {
-    let r = if repo.is_empty() { DEFAULT_REPO } else { repo };
-    if r.is_empty() {
-        return Err(
-            "未设置 GitHub 仓库地址。\n  \
-             请使用 --repo 参数指定，格式: owner/name\n  \
-             示例: nebula --check-update --repo yourname/nebula"
-                .into(),
-        );
-    }
-    Ok(r)
 }
 
 fn fetch_latest_release(repo: &str) -> Result<ReleaseInfo, String> {
