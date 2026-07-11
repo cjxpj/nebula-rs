@@ -1931,6 +1931,59 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
     let resolved_args: Vec<String> = args.iter().map(|a| ctx.val.text(a)).collect();
     let args: &[String] = &resolved_args;
 
+    // $var:func$ — 冒号语法：执行函数并将结果赋值给变量
+    // 例如：$s:创建服务器$ → 调用 创建服务器()，结果存入变量 s
+    if let Some(colon_pos) = name.find(':') {
+        let var_name = &name[..colon_pos];
+        let func_name = &name[colon_pos + 1..];
+        if !var_name.is_empty() && !func_name.is_empty() && !func_name.contains(':') {
+            let all_args: Vec<String> = {
+                let mut a = vec![func_name.to_string()];
+                a.extend(args.iter().cloned());
+                a
+            };
+            let content = if args.is_empty() {
+                func_name.to_string()
+            } else {
+                let mut s = func_name.to_string();
+                for a in args {
+                    s.push(' ');
+                    s.push_str(a);
+                }
+                s
+            };
+
+            // 先查内置函数
+            if let Some(&builtin_fn) = ctx.shared.builtins.get(func_name) {
+                if let Some(out) = builtin_fn(ctx, &all_args, &content) {
+                    ctx.val.p.set_string(var_name, out.clone());
+                    ctx.val.set_g_string(var_name, out);
+                }
+                return;
+            }
+
+            // 非内置函数：查找并执行本地函数
+            if let Some((code, _param_names, _defaults, _is_variadic, func_line)) = ctx.find_func_prefix(func_name) {
+                let mut sub_ctx = ctx.fresh_sub_context();
+                sub_ctx.sys.line_offset = func_line;
+                sub_ctx.sys.source_file = ctx.sys.source_file.clone();
+                sub_ctx.val.p.set_string("self", func_name.to_string());
+                sub_ctx.val.p.set_string("触发", func_name.to_string());
+                sub_ctx.val.p.set_string("参数0", func_name.to_string());
+                for (i, arg) in args.iter().enumerate() {
+                    sub_ctx.val.p.set_string(&format!("参数{}", i + 1), arg.clone());
+                }
+                entry(&mut sub_ctx, &code);
+                let result = sub_ctx.output.get();
+                if !result.is_empty() {
+                    ctx.val.p.set_string(var_name, result.clone());
+                    ctx.val.set_g_string(var_name, result);
+                }
+            }
+            return;
+        }
+    }
+
     // $.method → 解析 self 变量获取当前类名，转为 ClassName.method
     let name_resolved: std::borrow::Cow<str>;
     let name: &str = if name.len() > 2 && name.starts_with('%') && name.ends_with('%') {
@@ -2424,6 +2477,12 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                 resolved_obj
             };
             if !resolved_obj.is_empty() {
+                // === 服务器 OOP 实例方法调度 (.静态, .启动) ===
+                if crate::functions::is_server_instance(&resolved_obj) {
+                    crate::functions::dispatch_server_method(ctx, &resolved_obj, method, args);
+                    return;
+                }
+
                 let pure_class = resolved_obj.rfind('@').map(|p| &resolved_obj[..p]).unwrap_or(&resolved_obj);
                 let qualified = format!("{}.{}", pure_class, method);
                 // 若 resolved_obj 是 "pkg.Class" 格式 → 拆分为 (pkg, Class)，仅在目标包中搜索

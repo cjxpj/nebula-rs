@@ -53,6 +53,37 @@ fn set_request(handle: &str, req: AccessRequest) {
     }
 }
 
+// ==================== 服务器 OOP 实例 ====================
+
+/// 服务器实例（OOP 风格服务器管理）
+#[derive(Debug, Clone)]
+pub(crate) struct ServerInstance {
+    pub port: String,
+    pub handler_ref: Option<String>,
+    /// 静态文件本地目录路径
+    pub static_dir: Option<String>,
+    /// 静态文件网络路径（URL 前缀），空字符串 = 根路径 "/"
+    pub static_url_path: Option<String>,
+}
+
+static SERVER_STORE: LazyLock<Mutex<HashMap<String, ServerInstance>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) fn get_server(handle: &str) -> Option<ServerInstance> {
+    SERVER_STORE.lock().ok()?.get(handle).cloned()
+}
+
+pub(crate) fn set_server(handle: &str, srv: ServerInstance) {
+    if let Ok(mut store) = SERVER_STORE.lock() {
+        store.insert(handle.to_string(), srv);
+    }
+}
+
+/// 判断一个 handle 是否为服务器实例
+pub(crate) fn is_server_instance(handle: &str) -> bool {
+    handle.starts_with("服务器@")
+}
+
 // ==================== @基础 模块函数 ====================
 
 /// Python range(stop) 或 range(start, stop, step)
@@ -368,7 +399,7 @@ pub fn register_builtins(ctx: &mut DicContext) {
     builtins.insert("主回调".to_string(), main_callback_fn);
     builtins.insert("打印".to_string(), print_fn);
     builtins.insert("打印返回".to_string(), print_return_fn);
-    builtins.insert("启动服务器".to_string(), server_fn);
+    builtins.insert("创建服务器".to_string(), create_server_fn);
     builtins.insert("截取".to_string(), substr_fn);
     builtins.insert("替换".to_string(), replace_fn);
     builtins.insert("删前缀".to_string(), trim_prefix_fn);
@@ -595,18 +626,87 @@ fn print_return_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opt
     Some(print_core(ctx, args))
 }
 
-/// $启动服务器 端口 [处理函数|变量]$ — 启动 TCP/HTTP 服务器持续监听触发词
-/// 如果指定了处理函数名，则每个客户端连接时调用该 [函数] 处理
-/// 支持传入变量名：每次请求时读取该变量的值作为函数指针（动态分发）
-/// 自动检测 HTTP 请求并返回正确的 HTTP 响应
-/// 否则按普通触发词匹配
-fn server_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+// ===== 创建服务器 — 创建服务器 OOP 实例，返回句柄 =====
+
+fn create_server_fn(_ctx: &mut DicContext, _args: &[String], _content: &str) -> Option<String> {
+    let instance_id = next_instance_id();
+    let handle = format!("服务器@{}", instance_id);
+    let srv = ServerInstance {
+        port: "8080".to_string(),
+        handler_ref: None,
+        static_dir: None,
+        static_url_path: None,
+    };
+    set_server(&handle, srv);
+    Some(handle)
+}
+
+// ===== 服务器实例方法：.静态 和 .启动 =====
+
+/// 服务器.静态 — 配置静态文件目录，由 executor 通过 dispatch_server_method 调用
+pub(crate) fn server_static_method(ctx: &mut DicContext, handle: &str, args: &[String]) -> Option<String> {
+    let Some(mut srv) = get_server(handle) else {
+        return Some(format!("[错误] {} 服务器实例不存在", ctx.sys.file_location()));
+    };
+    let dir = args.first().map(|s| s.as_str()).unwrap_or("静态");
+    srv.static_dir = Some(ctx.val.text(dir));
+    // 第二个参数：网络路径（URL 前缀），留空 = 根路径 "/"
+    let url_path = args.get(1).map(|s| ctx.val.text(s)).unwrap_or_default();
+    srv.static_url_path = Some(url_path);
+    set_server(handle, srv);
+    None
+}
+
+/// 服务器.启动 — 启动服务器监听，由 executor 通过 dispatch_server_method 调用
+pub(crate) fn server_start_method(ctx: &mut DicContext, handle: &str, args: &[String]) -> Option<String> {
+    let Some(srv) = get_server(handle) else {
+        return Some(format!("[错误] {} 服务器实例不存在", ctx.sys.file_location()));
+    };
+
+    let handler_ref: Option<String> = args.get(1).map(|s| s.to_string());
+
+    // 未传入端口则使用实例默认端口
+    let port = match args.first() {
+        Some(s) => ctx.val.text(s.as_str()),
+        None => srv.port.clone(),
+    };
+    let handler_ref = handler_ref.or(srv.handler_ref.clone());
+    let static_dir = srv.static_dir.clone();
+    let static_url_path = srv.static_url_path.clone();
+
+    run_server(ctx, &port, &handler_ref, &static_dir, &static_url_path)
+}
+
+/// 服务器实例方法调度入口（由 executor.rs 调用）
+pub(crate) fn dispatch_server_method(
+    ctx: &mut DicContext,
+    handle: &str,
+    method: &str,
+    args: &[String],
+) -> Option<String> {
+    match method {
+        "静态" => server_static_method(ctx, handle, args),
+        "启动" => server_start_method(ctx, handle, args),
+        _ => {
+            ctx.sys.error = Some(format!(
+                "[错误] {} 服务器不支持方法 '{}'", ctx.sys.file_location(), method
+            ));
+            None
+        }
+    }
+}
+
+/// 运行服务器（从 server_fn 重构而来，支持 OOP 实例配置）
+fn run_server(
+    ctx: &mut DicContext,
+    port: &str,
+    handler_ref: &Option<String>,
+    static_dir: &Option<String>,
+    static_url_path: &Option<String>,
+) -> Option<String> {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
 
-    let port = args.get(1).map(|s| s.as_str()).unwrap_or("8080");
-    // handler_ref: 直接函数名 或 存储函数指针的变量名
-    let handler_ref: Option<String> = args.get(2).map(|s| s.to_string());
     let bind_addr = format!("0.0.0.0:{}", port);
 
     let listener = match TcpListener::bind(&bind_addr) {
@@ -616,9 +716,7 @@ fn server_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
             return Some(format!("[错误] {} 服务器启动失败: {}", ctx.sys.file_location(), e));
         }
     };
-    // println!("[Nebula] 服务器已启动 (HTTP + TCP): http://{}", bind_addr);
 
-    // 保存初始上下文作为模板
     let mut base_ctx = ctx.clone();
 
     for stream in listener.incoming() {
@@ -629,11 +727,9 @@ fn server_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
                 continue;
             }
         };
-        let _ = stream.peer_addr();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut writer = stream;
 
-        // 读取第一行判断是否为 HTTP 请求
         let mut first_line = String::new();
         match reader.read_line(&mut first_line) {
             Ok(0) => continue,
@@ -645,7 +741,6 @@ fn server_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
             continue;
         }
 
-        // 检测是否 HTTP 请求
         let is_http = first_line.starts_with("GET ")
             || first_line.starts_with("POST ")
             || first_line.starts_with("PUT ")
@@ -655,8 +750,6 @@ fn server_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
             || first_line.starts_with("PATCH ");
 
         if is_http {
-            // === HTTP 模式 ===
-            // 读取所有 HTTP 头（直到空行）
             let http_method = first_line.split_whitespace().next().unwrap_or("GET").to_string();
             let mut http_path = String::new();
             let parts: Vec<&str> = first_line.split_whitespace().collect();
@@ -664,16 +757,68 @@ fn server_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
                 http_path = parts[1].to_string();
             }
 
-            // 分离路径和查询参数
             let (path_only, query_string) = if let Some(qm) = http_path.find('?') {
                 (http_path[..qm].to_string(), http_path[qm + 1..].to_string())
             } else {
                 (http_path.clone(), String::new())
             };
-            // 构建 _GET JSON
             let get_json = build_query_json(&query_string);
 
-            // 读取头部并跟踪 Content-Length
+            // === 静态文件服务 ===
+            if let Some(ref sdir) = static_dir {
+                if path_only.starts_with('/') {
+                    // 网络路径：匹配 URL 前缀（空 = 根路径）
+                    let url_prefix = static_url_path.as_deref().unwrap_or("");
+                    let url_prefix = url_prefix.trim_matches('/');
+
+                    // 去掉开头的 /
+                    let rel = path_only.trim_start_matches('/');
+
+                    // 匹配网络路径前缀
+                    let rel_path = if url_prefix.is_empty() {
+                        // 根路径：整个 URL 路径直接映射到文件
+                        rel.to_string()
+                    } else if let Some(stripped) = rel.strip_prefix(url_prefix) {
+                        stripped.trim_start_matches('/').to_string()
+                    } else {
+                        String::new()
+                    };
+
+                    if !rel_path.is_empty() || url_prefix.is_empty() {
+                        let file_path = if rel_path.is_empty() {
+                            // 目录请求 → 尝试 index.html
+                            format!("{}/index.html", sdir.trim_end_matches('/'))
+                        } else {
+                            format!("{}/{}", sdir.trim_end_matches('/'), rel_path)
+                        };
+                        if let Ok(data) = std::fs::read(&file_path) {
+                            let mime = mime_from_path(&file_path);
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+                                mime, data.len()
+                            );
+                            let _ = writer.write_all(response.as_bytes());
+                            let _ = writer.write_all(&data);
+                            let _ = writer.flush();
+                            continue;
+                        }
+                        // 文件不存在 → 尝试 404.html
+                        let not_found_path = format!("{}/404.html", sdir.trim_end_matches('/'));
+                        if let Ok(data) = std::fs::read(&not_found_path) {
+                            let response = format!(
+                                "HTTP/1.1 404 Not Found\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+                                data.len()
+                            );
+                            let _ = writer.write_all(response.as_bytes());
+                            let _ = writer.write_all(&data);
+                            let _ = writer.flush();
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // 读取头部
             let mut headers_map = serde_json::Map::new();
             let mut content_length: usize = 0;
             loop {
@@ -685,9 +830,8 @@ fn server_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
                 }
                 let header_trimmed = header_line.trim().to_string();
                 if header_trimmed.is_empty() {
-                    break; // 头部结束
+                    break;
                 }
-                // 收集所有头部
                 if let Some(colon) = header_trimmed.find(':') {
                     let key = header_trimmed[..colon].trim().to_string();
                     let val = header_trimmed[colon + 1..].trim().to_string();
@@ -699,7 +843,6 @@ fn server_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
             }
             let header_json = serde_json::Value::Object(headers_map).to_string();
 
-            // 读取 POST 请求体
             let post_body = if (http_method == "POST" || http_method == "PUT" || http_method == "PATCH")
                 && content_length > 0
             {
@@ -713,34 +856,28 @@ fn server_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
                 String::new()
             };
 
-            // 尝试将 POST body 解析为 JSON，失败则保持原字符串
             let post_json = if post_body.is_empty() {
                 "{}".to_string()
             } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(&post_body) {
                 v.to_string()
             } else {
-                // 非 JSON → 包装为 {"raw": "..."}
                 format!("{{\"raw\":{}}}", serde_json::Value::String(post_body))
             };
 
-            // 构建 _DATA（聚合所有数据）
             let data_json = format!(
                 r#"{{"method":"{}","path":"{}","header":{},"get":{},"post":{}}}"#,
                 http_method, path_only, header_json, get_json, post_json
             );
 
-            // 构建请求触发文本（路径作为触发词）
             let trigger = if http_path.is_empty() {
                 first_line.to_string()
             } else {
                 http_path
             };
 
-            // 动态解析函数指针（每次请求从变量读取）
-            let handler_name = resolve_handler_name(&base_ctx, &handler_ref);
+            let handler_name = resolve_handler_name(&base_ctx, handler_ref);
             let handler_code = handler_name.as_ref().and_then(|name| base_ctx.find_internal_prefix(name));
 
-            // 执行处理
             let (response_body, rheader_raw, status_code) = if let Some(ref code) = handler_code {
                 let mut req_ctx = base_ctx.clone();
                 req_ctx.val.p.set_string("触发", trigger.clone());
@@ -759,18 +896,15 @@ fn server_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
                 if !Arc::ptr_eq(&base_ctx.shared, &req_ctx.shared) {
                     base_ctx.shared = req_ctx.shared.clone();
                 }
-                // 读取响应头、状态码
                 let rheader_raw = crate::value::Val::lookup_display("_设置头部", req_ctx.val.p.get_all(), Some(req_ctx.val.g.get_all()));
                 let status_code = crate::value::Val::lookup_display("_状态码", req_ctx.val.p.get_all(), Some(req_ctx.val.g.get_all()));
                 let body = req_ctx.output.get();
                 std::mem::swap(&mut base_ctx.val, &mut req_ctx.val);
                 (body, rheader_raw, status_code)
             } else {
-                // 无处理函数时，匹配触发词
                 (match_tcp_trigger(&base_ctx, &trigger), String::new(), "200".to_string())
             };
 
-            // 解析自定义响应头
             let mut extra_header_lines = String::new();
             if !rheader_raw.is_empty() {
                 if let Ok(obj) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&rheader_raw) {
@@ -784,7 +918,6 @@ fn server_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
                 }
             }
 
-            // 构建 HTTP 响应
             let status_text = match status_code.as_str() {
                 "200" => "OK",
                 "201" => "Created",
@@ -812,11 +945,10 @@ fn server_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
             let _ = writer.write_all(http_response.as_bytes());
             let _ = writer.flush();
         } else {
-            // === TCP 原始模式 ===
+            // TCP 原始模式
             let trigger = first_line.to_string();
-            write_tcp_output(&mut writer, handle_tcp_request(&mut base_ctx, &handler_ref, &trigger));
+            write_tcp_output(&mut writer, handle_tcp_request(&mut base_ctx, handler_ref, &trigger));
 
-            // 继续读取后续行（TCP 长连接模式）
             let mut line = String::new();
             loop {
                 line.clear();
@@ -829,12 +961,36 @@ fn server_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
                 if trigger.is_empty() {
                     continue;
                 }
-                write_tcp_output(&mut writer, handle_tcp_request(&mut base_ctx, &handler_ref, &trigger));
+                write_tcp_output(&mut writer, handle_tcp_request(&mut base_ctx, handler_ref, &trigger));
             }
         }
-        // println!("[Nebula] 客户端断开: {}", peer_addr);
     }
     None
+}
+
+/// 根据文件路径返回 MIME 类型
+fn mime_from_path(path: &str) -> &'static str {
+    let ext = path.rfind('.').map(|i| &path[i..]).unwrap_or("");
+    match ext {
+        ".html" | ".htm" => "text/html; charset=utf-8",
+        ".css" => "text/css; charset=utf-8",
+        ".js" => "application/javascript; charset=utf-8",
+        ".json" => "application/json; charset=utf-8",
+        ".png" => "image/png",
+        ".jpg" | ".jpeg" => "image/jpeg",
+        ".gif" => "image/gif",
+        ".svg" => "image/svg+xml",
+        ".ico" => "image/x-icon",
+        ".woff" => "font/woff",
+        ".woff2" => "font/woff2",
+        ".ttf" => "font/ttf",
+        ".wasm" => "application/wasm",
+        ".txt" => "text/plain; charset=utf-8",
+        ".xml" => "application/xml; charset=utf-8",
+        ".pdf" => "application/pdf",
+        ".zip" => "application/zip",
+        _ => "application/octet-stream",
+    }
 }
 
 /// 从变量或直接函数名解析出实际的函数名
