@@ -47,11 +47,11 @@
       {
         "language": "nr",
         "items": [
-          { "label": "字符串.", "detail": "字符串操作 — 需 #引入=@字符串", "kind": 8 },
-          { "label": "类型.", "detail": "类型转换 — 需 #引入=@类型", "kind": 8 },
-          { "label": "数学.", "detail": "数学运算 — 需 #引入=@数学", "kind": 8 },
-          { "label": "访问.", "detail": "HTTP 网络访问 — 需 #引入=@访问", "kind": 8 },
-          { "label": "画布.", "detail": "像素级图像绘制 — 需 #引入=@画布", "kind": 8 }
+          { "label": "字符串.", "detail": "字符串操作（内置）", "kind": 8 },
+          { "label": "类型.", "detail": "类型转换（内置）", "kind": 8 },
+          { "label": "数学.", "detail": "数学运算（内置）", "kind": 8 },
+          { "label": "访问.", "detail": "HTTP 网络访问（内置）", "kind": 8 },
+          { "label": "画布.", "detail": "像素级图像绘制（内置）", "kind": 8 }
         ]
       }
     ]

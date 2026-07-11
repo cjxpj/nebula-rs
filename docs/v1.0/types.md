@@ -84,7 +84,7 @@ done:false
 %TYPE@done%   → "布尔"
 ```
 
-布尔值可直接用于条件表达式（[控制流](./control-flow)），也可参与逻辑运算（[表达式 § 逻辑运算符](./expressions)）。
+布尔值可直接用于条件表达式（[判断逻辑](./control-flow)），也可参与逻辑运算（[表达式 § 逻辑运算符](./expressions)）。
 
 ### 空值（Null）
 

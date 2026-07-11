@@ -88,7 +88,29 @@ $如果 %_路径% == /api/json
 - 目录请求（如 `/` 或 `/assets/`）→ 自动查找 `index.html`
 - 文件不存在 → 尝试返回 `404.html`（HTTP 404），无则交由路由处理
 
-支持的 MIME 类型：
+### 路由判断示例
+
+以 `$s.静态 public assets$` 为例（网络路径 = `assets`）：
+
+| 请求 URL | 匹配结果 | 文件路径 | 说明 |
+| --- | --- | --- | --- |
+| `/assets/style.css` | 匹配 | `public/style.css` | 文件存在则返回 |
+| `/assets/js/app.js` | 匹配 | `public/js/app.js` | 子目录正常映射 |
+| `/assets` | 匹配 | `public/index.html` | 精确匹配 → 自动查找 index |
+| `/assets/` | 匹配 | `public/index.html` | 目录请求 → 自动查找 index |
+| `/assets/404.html` | 匹配 | `public/404.html` | 不存在 → 触发 404.html |
+| `/assetssomething/x.js` | 不匹配 | — | 前缀边界检查，交由路由 |
+| `/api/data` | 不匹配 | — | 非静态前缀，交由路由 |
+
+以 `$s.静态 public$` 为例（网络路径 = 空，根路径）：
+
+| 请求 URL | 匹配结果 | 文件路径 | 说明 |
+| --- | --- | --- | --- |
+| `/style.css` | 匹配 | `public/style.css` | 根路径：所有 URL 都匹配 |
+| `/` | 匹配 | `public/index.html` | 目录请求 → 自动查找 index |
+| `/api/data` | 匹配 | `public/api/data` | 不存在 → 404.html → 路由 |
+
+### 支持的 MIME 类型
 
 | 扩展名 | Content-Type |
 | --- | --- |
@@ -234,7 +256,7 @@ $如果 %_路径% == /api/users
   $访问转发 https://backend.internal/api/users$
 ```
 
-> 转发时读取 `_DATA` 变量获取原始请求数据。详见 [@访问](./network#net-访问转发)。
+> 转发时读取 `_DATA` 变量获取原始请求数据。详见 [网络访问](./network#net-访问转发)。
 
 ## TCP 模式
 
@@ -272,6 +294,6 @@ telnet localhost 2323
 当前时间：2025-...
 ```
 
-> 服务器自动检测 HTTP/TCP，HTTP 模式返回标准响应，TCP 模式支持长连接逐行交互。配合 [@访问](./network) 可构建完整 Web 服务。
+> 服务器自动检测 HTTP/TCP，HTTP 模式返回标准响应，TCP 模式支持长连接逐行交互。配合 [网络访问](./network) 可构建完整 Web 服务。
 
 [← 输出](./output-print) [对象创建 →](./object)

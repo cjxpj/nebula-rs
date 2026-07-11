@@ -17,7 +17,7 @@ pub(crate) fn next_instance_id() -> usize {
 
 // ==================== 访问请求结构体 ====================
 
-/// HTTP 请求对象（对标 Go access.go 中的 AccessRequest）
+/// HTTP 请求对象
 #[derive(Debug, Clone)]
 struct AccessRequest {
     method: String,           // "get" 或 "post"
@@ -30,7 +30,7 @@ struct AccessRequest {
     stop_redirect: bool,
 }
 
-/// HTTP 响应对象（对标 Go access.go 中的 AccessResponse）
+/// HTTP 响应对象
 #[derive(Debug, Clone)]
 struct AccessResponse {
     status_text: String,
@@ -84,7 +84,7 @@ pub(crate) fn is_server_instance(handle: &str) -> bool {
     handle.starts_with("服务器@")
 }
 
-// ==================== @基础 模块函数 ====================
+// ==================== 基础模块函数 ====================
 
 /// Python range(stop) 或 range(start, stop, step)
 /// 返回 JSON 数组字符串
@@ -257,10 +257,12 @@ fn ord_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Strin
     Some(code.to_string())
 }
 
-/// Python bin(n) — 整数转二进制字符串（0b 前缀）
+/// Python bin(n) — 整数转二进制字符串（0b 前缀），支持负数
 fn bin_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let n = resolve_num(ctx, args.get(1).map(|s| s.as_str()).unwrap_or("")).unwrap_or(0) as i64;
-    Some(format!("0b{:b}", n))
+    let abs = n.unsigned_abs();
+    let sign = if n < 0 { "-" } else { "" };
+    Some(format!("{}0b{:b}", sign, abs))
 }
 
 /// Python hex(n) — 整数转十六进制字符串（0x 前缀）
@@ -315,27 +317,9 @@ fn format_f64(v: f64) -> String {
     if v.fract() == 0.0 { (v as i64).to_string() } else { v.to_string() }
 }
 
-/// 标准库：通过 `#引入=@模块名` 按需加载
+/// 内置函数：所有函数通过 `register_builtins()` 全局注册，始终可用。
 ///
-/// # 用法
-///
-/// 在 .nr 文件头部声明引入，函数仅在使用 `#引入=` 导入后才生效：
-///
-/// ```nr
-/// #引入=@字符串      ← 不赋变量名，函数直接全局可用：$大写 hello$
-/// #引入=@数学        ← 不赋变量名，函数直接全局可用：$绝对值 -5$
-/// #引入=@访问        ← 不赋变量名，创建 OOP 对象：$创建访问 url$
-/// #引入=@画布      ← 不赋变量名，函数直接全局可用：$创建画布 100 100$
-/// ```
-///
-/// # 模块列表
-///
-/// | 模块名 | 包含函数 |
-/// |--------|---------|
-/// | `@访问` | 创建访问, 切换GET, 切换POST, POST, ... 等 12 个函数 |
-/// | `@画布` | 创建画布, 画布.获取, 画笔.设置颜色, ... 等 30 个函数 |
-///
-/// 注：以下 72 个函数已全局内置（无需 #引入），对标 Python builtins：
+/// 以下 72 个基础函数：
 /// 范围、枚举、配对、反转、排序、全真、任一真、映射、过滤、转布尔、
 /// 码转字、字转码、转二进制、转十六进制、商和余、
 /// 长度、文本包含、文本分割、头尾去空、判断数字、大写、小写、查找、计数、
@@ -346,16 +330,17 @@ fn format_f64(v: f64) -> String {
 /// 写文件、读文件、写、读、删除文件、删除文件夹、存在文件、存在文件夹、
 /// 存在文件或文件夹、文件后缀、文件头部、读文件行、文件夹列表、文件列表、
 /// 随机文件夹名、随机文件名、文件夹大小、文件大小、重命名、复制粘贴、下载文件
+///
+/// 此外访问（12 个函数）和画布（30 个函数）也均已全局内置。
 pub struct StdLib;
 
 impl StdLib {
-    /// 解析标准库模块，返回函数列表。未找到模块返回 None。
+    /// 预留接口：返回函数列表。当前始终返回 None。
     pub fn resolve(_module: &str) -> Option<Vec<(&'static str, BuiltinFn)>> {
         None
     }
 
-    /// 将标准库模块的函数注册到 builtins 表。
-    /// 返回注册的函数数量。模块不存在时返回 0。
+    /// 预留接口：将模块函数注册到 builtins 表。当前始终返回 0。
     pub fn register_module(ctx: &mut DicContext, module: &str) -> usize {
         let funcs = match Self::resolve(module) {
             Some(f) => f,
@@ -371,12 +356,12 @@ impl StdLib {
     }
 }
 
-/// 检查路径是否为标准库引入（以 @ 开头）
+/// 检查路径是否以 @ 开头（标记为内部模块路径）
 pub fn is_stdlib_path(path: &str) -> bool {
     path.starts_with('@')
 }
 
-/// 为标准库模块创建标记 BuildValue（解析阶段使用）
+/// 为内部模块创建标记 BuildValue（解析阶段使用）
 pub fn create_stdlib_package(module: &str) -> BuildValue {
     let mut pkg = BuildValue::new_empty();
     pkg.head.push(format!("@stdlib={}", module));
@@ -384,7 +369,7 @@ pub fn create_stdlib_package(module: &str) -> BuildValue {
     pkg
 }
 
-/// 判断 BuildValue 是否为标准库标记包
+/// 判断 BuildValue 是否为内部模块标记包
 pub fn is_stdlib_package(bv: &BuildValue) -> Option<&str> {
     bv.stdlib_module.as_deref()
 }
@@ -394,7 +379,7 @@ pub fn register_builtins(ctx: &mut DicContext) {
     let shared = Arc::make_mut(&mut ctx.shared);
     let builtins = Arc::make_mut(&mut shared.builtins);
 
-    // ===== 引擎核心函数（始终可用，无需 #引入=）=====
+    // ===== 引擎核心函数（始终可用）=====
     builtins.insert("回调".to_string(), callback_fn);
     builtins.insert("主回调".to_string(), main_callback_fn);
     builtins.insert("打印".to_string(), print_fn);
@@ -408,7 +393,7 @@ pub fn register_builtins(ctx: &mut DicContext) {
     builtins.insert("访问POST".to_string(), access_post_fn);
     builtins.insert("访问转发".to_string(), request_forward_fn);
 
-    // ===== 内置基础函数（对标 Python builtins，始终可用）=====
+    // ===== 内置基础函数 =====
     builtins.insert("范围".to_string(), range_fn);
     builtins.insert("枚举".to_string(), enumerate_fn);
     builtins.insert("配对".to_string(), zip_fn);
@@ -774,17 +759,28 @@ fn run_server(
                     // 去掉开头的 /
                     let rel = path_only.trim_start_matches('/');
 
-                    // 匹配网络路径前缀
+                    // 匹配网络路径前缀（仅匹配路径边界）
                     let rel_path = if url_prefix.is_empty() {
                         // 根路径：整个 URL 路径直接映射到文件
                         rel.to_string()
                     } else if let Some(stripped) = rel.strip_prefix(url_prefix) {
-                        stripped.trim_start_matches('/').to_string()
+                        // 仅当 stripped 为空（精确匹配）或以 / 开头（子路径）才算匹配
+                        if stripped.is_empty() || stripped.starts_with('/') {
+                            stripped.trim_start_matches('/').to_string()
+                        } else {
+                            String::new()
+                        }
                     } else {
                         String::new()
                     };
 
-                    if !rel_path.is_empty() || url_prefix.is_empty() {
+                    // 路径匹配时进入静态处理：
+                    // - 根路径(url_prefix空)：所有请求
+                    // - 子路径(!rel_path空)：有具体文件路径
+                    // - 空 rel_path 但 rel 匹配前缀：目录请求(/assets 或 /assets/)
+                    let prefix_matched = url_prefix.is_empty() || !rel_path.is_empty()
+                        || rel == url_prefix || rel.starts_with(&format!("{}/", url_prefix));
+                    if prefix_matched {
                         let file_path = if rel_path.is_empty() {
                             // 目录请求 → 尝试 index.html
                             format!("{}/index.html", sdir.trim_end_matches('/'))
@@ -1211,7 +1207,7 @@ fn resolve_num(ctx: &DicContext, s: &str) -> Option<usize> {
     v.trim().parse::<usize>().ok()
 }
 
-// ==================== @访问 模块 ====================
+// ==================== 访问 模块 ====================
 
 /// 判断字符串是否为有效 JSON
 fn is_json_str(s: &str) -> bool {
@@ -1831,14 +1827,14 @@ fn is_number_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option
 
 // ===== 大小写转换 =====
 
-/// $大写 文本$ — 转为大写，对标 Python str.upper()
+/// $大写 文本$ — 转为大写
 fn upper_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let value = args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
     let text = ctx.val.text(&value);
     Some(text.to_uppercase())
 }
 
-/// $小写 文本$ — 转为小写，对标 Python str.lower()
+/// $小写 文本$ — 转为小写
 fn lower_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let value = args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
     let text = ctx.val.text(&value);
@@ -1847,7 +1843,7 @@ fn lower_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Str
 
 // ===== 查找与统计 =====
 
-/// $查找 字符串 子串$ — 查找子串位置（0-based），找不到返回 "-1"，对标 Python str.find()
+/// $查找 字符串 子串$ — 查找子串位置（0-based），找不到返回 "-1"
 fn find_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let sub = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
@@ -1862,7 +1858,7 @@ fn find_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Stri
     }
 }
 
-/// $计数 字符串 子串$ — 统计子串出现次数，对标 Python str.count()
+/// $计数 字符串 子串$ — 统计子串出现次数
 fn count_sub_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let sub = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
@@ -1872,14 +1868,14 @@ fn count_sub_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option
 
 // ===== 前后缀判断 =====
 
-/// $开头判断 字符串 前缀$ — 判断是否以指定前缀开头，返回 1/0，对标 Python str.startswith()
+/// $开头判断 字符串 前缀$ — 判断是否以指定前缀开头，返回 1/0
 fn starts_with_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let prefix = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
     Some(if s.starts_with(&prefix) { "1" } else { "0" }.to_string())
 }
 
-/// $结尾判断 字符串 后缀$ — 判断是否以指定后缀结尾，返回 1/0，对标 Python str.endswith()
+/// $结尾判断 字符串 后缀$ — 判断是否以指定后缀结尾，返回 1/0
 fn ends_with_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let suffix = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
@@ -1888,7 +1884,7 @@ fn ends_with_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option
 
 // ===== 数学函数 =====
 
-/// $绝对值 数字$ — 返回绝对值，对标 Python abs()
+/// $绝对值 数字$ — 返回绝对值
 fn abs_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let value = args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
     let text = ctx.val.text(&value);
@@ -1922,19 +1918,19 @@ fn extreme_fn(ctx: &mut DicContext, args: &[String], better: fn(f64, f64) -> boo
     best.map(format_f64)
 }
 
-/// $最大值 数字1 数字2 ...$ — 返回最大值，对标 Python max()
+/// $最大值 数字1 数字2 ...$ — 返回最大值
 fn max_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     extreme_fn(ctx, args, |a, b| a > b)
 }
 
-/// $最小值 数字1 数字2 ...$ — 返回最小值，对标 Python min()
+/// $最小值 数字1 数字2 ...$ — 返回最小值
 fn min_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     extreme_fn(ctx, args, |a, b| a < b)
 }
 
 // ===== 文本拼接与重复 =====
 
-/// $文本连接 分隔符 文本1 文本2 ...$ — 用分隔符连接多个文本，对标 Python str.join()
+/// $文本连接 分隔符 文本1 文本2 ...$ — 用分隔符连接多个文本
 fn join_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let sep = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let parts: Vec<String> = args.iter().skip(2)
@@ -1943,7 +1939,7 @@ fn join_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Stri
     Some(parts.join(&sep))
 }
 
-/// $文本重复 文本 次数$ — 将文本重复指定次数，对标 Python str * n
+/// $文本重复 文本 次数$ — 将文本重复指定次数
 fn repeat_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let n: usize = args.get(2)
@@ -1983,9 +1979,9 @@ fn is_upper_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<
     })
 }
 
-/// Python str.isspace() — 空字符串返回 "1"
+/// Python str.isspace() — 全空白字符且非空时返回 "1"
 fn is_space_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    str_predicate_fn(ctx, args, |s| s.is_empty() || s.chars().all(|c| c.is_whitespace()))
+    str_predicate_fn(ctx, args, |s| !s.is_empty() && s.chars().all(|c| c.is_whitespace()))
 }
 
 // ==================== 字符串变形函数 ====================
@@ -2145,7 +2141,7 @@ fn random_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
     }
 }
 
-// ==================== @画布 模块 ====================
+// ==================== 画布 模块 ====================
 
 /// 获取画布句柄和参数起始偏移（OOP 兼容）
 /// 返回 (handle, data_start_index)
@@ -2187,7 +2183,7 @@ macro_rules! canvas_err {
     };
 }
 
-/// $创建画布 [width] [height] [bgColor]$ — 对标 Go drawImgNew，生成并返回画布对象结构体
+/// $创建画布 [width] [height] [bgColor]$ — 生成并返回画布对象结构体
 fn canvas_new_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let resolved = resolve_args(ctx, args);
     match canvas::canvas_new(&resolved) {
@@ -2555,7 +2551,7 @@ fn is_leap_year(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
 }
 
-/// $写文件 路径 内容$ — 将内容写入文件（对标 Go writeStringFile）
+/// $写文件 路径 内容$ — 将内容写入文件
 fn write_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let data = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
@@ -2572,7 +2568,7 @@ fn write_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -
     }
 }
 
-/// $读文件 路径 [默认值]$ — 读取整个文件内容，失败时返回默认值（对标 Go readStringFile）
+/// $读文件 路径 [默认值]$ — 读取整个文件内容，失败时返回默认值
 fn read_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let default = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
@@ -2590,7 +2586,7 @@ fn read_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) ->
     }
 }
 
-/// $写 路径 键 值$ — 将键值对写入 database/ 下的键值文件（对标 Go writeKeyStringFile）
+/// $写 路径 键 值$ — 将键值对写入 database/ 下的键值文件
 /// 文件格式：首行为更新时间，后续每行为 key=value
 fn write_key_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let key = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
@@ -2636,7 +2632,7 @@ fn write_key_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &st
     None
 }
 
-/// $读 路径 [键] [默认值]$ — 读取 database/ 下的键值文件（对标 Go readKeyStringFile）
+/// $读 路径 [键] [默认值]$ — 读取 database/ 下的键值文件
 /// 不传键时返回全部键值对的 JSON 数组；传键时查找对应值，未找到返回默认值
 fn read_key_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let key = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
@@ -2684,7 +2680,7 @@ fn read_key_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str
 
 // ==================== 更多文件操作 ====================
 
-/// $删除文件 路径$ — 删除文件（对标 Go deleteFile）
+/// $删除文件 路径$ — 删除文件
 fn delete_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     if path.is_empty() { return None; }
@@ -2698,7 +2694,7 @@ fn delete_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
     None
 }
 
-/// $删除文件夹 路径$ — 删除文件夹及其所有内容（对标 Go deleteDir）
+/// $删除文件夹 路径$ — 删除文件夹及其所有内容
 fn delete_dir_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     if path.is_empty() { return None; }
@@ -2712,7 +2708,7 @@ fn delete_dir_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Optio
     None
 }
 
-/// $存在文件 路径$ — 判断是否为已存在的文件，返回 true/false（对标 Go fileExist）
+/// $存在文件 路径$ — 判断是否为已存在的文件，返回 true/false
 fn file_exist_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let path_buf = std::path::PathBuf::from(&path);
@@ -2722,7 +2718,7 @@ fn file_exist_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Optio
     Some(exists.to_string())
 }
 
-/// $存在文件夹 路径$ — 判断是否为已存在的文件夹，返回 true/false（对标 Go dirExist）
+/// $存在文件夹 路径$ — 判断是否为已存在的文件夹，返回 true/false
 fn dir_exist_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let path_buf = std::path::PathBuf::from(&path);
@@ -2732,7 +2728,7 @@ fn dir_exist_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option
     Some(exists.to_string())
 }
 
-/// $存在文件或文件夹 路径$ — 判断路径是否存在，返回 true/false（对标 Go fileOrDirExist）
+/// $存在文件或文件夹 路径$ — 判断路径是否存在，返回 true/false
 fn file_or_dir_exist_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let path_buf = std::path::PathBuf::from(&path);
@@ -2742,7 +2738,7 @@ fn file_or_dir_exist_fn(ctx: &mut DicContext, args: &[String], _content: &str) -
     Some(exists.to_string())
 }
 
-/// $文件后缀 路径$ — 获取文件扩展名，含前导点（对标 Go fileSuffix / filepath.Ext）
+/// $文件后缀 路径$ — 获取文件扩展名，含前导点
 fn file_suffix_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let ext = std::path::Path::new(&path)
@@ -2816,7 +2812,7 @@ fn file_header_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
     Some(mime.to_string())
 }
 
-/// 简易伪随机数生成器（无需外部依赖，对标 Go utils.RandNum）
+/// 简易伪随机数生成器
 fn simple_rand(max: usize) -> usize {
     if max == 0 { return 0; }
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2835,7 +2831,7 @@ fn simple_rand(max: usize) -> usize {
 
 
 /// $读文件行 路径 起始行 数量 [默认值]$ — 从起始行开始读取指定数量的行，返回 JSON 数组
-/// 起始行和数量均为 1-based（对标 Go readStringFileLines）
+/// 起始行和数量均为 1-based
 fn read_file_lines_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let start: usize = args.get(2).and_then(|a| resolve_num(ctx, a)).unwrap_or(1).max(1);
@@ -2856,7 +2852,7 @@ fn read_file_lines_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> 
     Some(serde_json::Value::Array(selected).to_string())
 }
 
-/// $文件夹列表 [路径]$ — 列出目录下的文件夹名，返回 JSON 数组（对标 Go dirList）
+/// $文件夹列表 [路径]$ — 列出目录下的文件夹名，返回 JSON 数组
 fn dir_list_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let path_buf = std::path::PathBuf::from(&path);
@@ -2871,7 +2867,7 @@ fn dir_list_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<
     Some(serde_json::Value::Array(dirs).to_string())
 }
 
-/// $文件列表 [路径]$ — 列出目录下的文件名，返回 JSON 数组（对标 Go fileList）
+/// $文件列表 [路径]$ — 列出目录下的文件名，返回 JSON 数组
 fn file_list_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let path_buf = std::path::PathBuf::from(&path);
@@ -2886,7 +2882,7 @@ fn file_list_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option
     Some(serde_json::Value::Array(files).to_string())
 }
 
-/// $随机文件夹名 [路径]$ — 随机返回目录下的一个文件夹名（对标 Go randomDirName）
+/// $随机文件夹名 [路径]$ — 随机返回目录下的一个文件夹名
 fn random_dir_name_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let path_buf = std::path::PathBuf::from(&path);
@@ -2903,7 +2899,7 @@ fn random_dir_name_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> 
     Some(dirs[idx].clone())
 }
 
-/// $随机文件名 [路径]$ — 随机返回目录下的一个文件名（对标 Go randomFileName）
+/// $随机文件名 [路径]$ — 随机返回目录下的一个文件名
 fn random_file_name_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let path_buf = std::path::PathBuf::from(&path);
@@ -2920,7 +2916,7 @@ fn random_file_name_fn(ctx: &mut DicContext, args: &[String], _content: &str) ->
     Some(files[idx].clone())
 }
 
-/// $文件夹大小 路径$ — 递归计算目录总大小（字节）（对标 Go dirSize）
+/// $文件夹大小 路径$ — 递归计算目录总大小（字节）
 fn dir_size_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let path_buf = std::path::PathBuf::from(&path);
@@ -2941,7 +2937,7 @@ fn dir_calc_size(path: &std::path::Path) -> u64 {
     total
 }
 
-/// $文件大小 路径$ — 获取文件大小（字节）（对标 Go fileSize）
+/// $文件大小 路径$ — 获取文件大小（字节）
 fn file_size_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let path_buf = std::path::PathBuf::from(&path);
@@ -2951,7 +2947,7 @@ fn file_size_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option
     Some(size.to_string())
 }
 
-/// $重命名 原路径 新路径$ — 重命名文件或文件夹，返回 true/false（对标 Go fileRename）
+/// $重命名 原路径 新路径$ — 重命名文件或文件夹，返回 true/false
 fn file_rename_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let src = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let dst = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
@@ -2961,7 +2957,7 @@ fn file_rename_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
     Some(ok.to_string())
 }
 
-/// $复制粘贴 原路径 目标路径$ — 复制文件或文件夹，返回 true/false（对标 Go fileCopy）
+/// $复制粘贴 原路径 目标路径$ — 复制文件或文件夹，返回 true/false
 fn file_copy_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let src = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let dst = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
@@ -2991,7 +2987,7 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
     Ok(())
 }
 
-/// $下载文件 下载地址 保存路径$ — 从 URL 下载文件到本地（对标 Go downloadFile）
+/// $下载文件 下载地址 保存路径$ — 从 URL 下载文件到本地
 fn download_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let url = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let save_path = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
