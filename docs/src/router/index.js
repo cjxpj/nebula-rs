@@ -6,9 +6,9 @@ export default createRouter({
   history: createWebHashHistory(),
   routes: [
     { path: '/', component: HomePage },
-    { path: '/v1.0', redirect: '/v1.0/' },
-    { path: '/v1.0/', component: MarkdownPage },
-    { path: '/v1.0/:page', component: MarkdownPage }
+    { path: '/:version', redirect: to => `/${to.params.version}/` },
+    { path: '/:version/', component: MarkdownPage },
+    { path: '/:version/:page', component: MarkdownPage }
   ],
   scrollBehavior(to) {
     if (to.hash) {

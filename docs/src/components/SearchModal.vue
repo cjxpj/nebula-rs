@@ -1,8 +1,10 @@
 <script setup>
 import { ref, watch, nextTick } from 'vue'
+import { useRoute } from 'vue-router'
 import { search } from '../composables/useSearchIndex.js'
 
 const emit = defineEmits(['close'])
+const route = useRoute()
 
 const query = ref('')
 const results = ref([])
@@ -12,7 +14,7 @@ const inputEl = ref(null)
 nextTick(() => inputEl.value?.focus())
 
 watch(query, (q) => {
-  results.value = search(q)
+  results.value = search(q, route.path)
   selectedIndex.value = 0
 })
 

@@ -1,13 +1,22 @@
 <script setup>
-const versions = [
-  { label: 'v1.0', path: '/v1.0/' }
-]
+import { computed } from 'vue'
+import { useRoute } from 'vue-router'
+import { availableVersions, getVersionFromPath } from '../composables/useVersion.js'
+
+const route = useRoute()
+
+const versions = computed(() =>
+  availableVersions.map(v => ({
+    label: v,
+    path: `/${v}/`
+  }))
+)
+
+const current = computed(() => `/${getVersionFromPath(route.path)}/`)
 
 function onChange(e) {
   window.location.hash = '#' + e.target.value
 }
-
-const current = '/v1.0/'
 </script>
 
 <template>

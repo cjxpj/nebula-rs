@@ -1,22 +1,27 @@
 <script setup>
+import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { sidebarGroups } from '../composables/useDocNav.js'
+import { getVersionFromPath } from '../composables/useVersion.js'
 
 const route = useRoute()
+const version = computed(() => getVersionFromPath(route.path))
 
 function buildHref(link) {
   const hashIdx = link.indexOf('#')
   const path = hashIdx >= 0 ? link.substring(0, hashIdx) : link
   const hash = hashIdx >= 0 ? link.substring(hashIdx) : ''
-  return '#' + path + hash
+  return `#/${version.value}${path}${hash}`
 }
 
 function isActive(link) {
+  const prefix = `/${version.value}`
   const [pathOnly, hash] = link.split('#')
+  const fullPath = `${prefix}${pathOnly}`
   if (hash) {
-    return route.path === pathOnly && route.hash === '#' + hash
+    return route.path === fullPath && route.hash === '#' + hash
   }
-  return route.path === pathOnly && !route.hash
+  return route.path === fullPath && !route.hash
 }
 </script>
 

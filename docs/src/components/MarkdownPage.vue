@@ -3,11 +3,12 @@ import { computed, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { marked } from 'marked'
 import DocFooter from './DocFooter.vue'
+import { getVersionFromPath } from '../composables/useVersion.js'
 
 const route = useRoute()
 
 const mdModules = import.meta.glob(
-  ['../../v1.0/*.md'],
+  ['../../*/*.md'],
   { query: '?raw', import: 'default', eager: true }
 )
 
@@ -25,24 +26,25 @@ function addHeadingIds(html) {
   )
 }
 
-function preprocessLinks(md) {
+function preprocessLinks(md, version) {
   return md.replace(/\]\(\.\/([^)]*?)\)/g, (_, path) => {
     if (/\.(vsix|png|jpg|gif|svg|pdf)$/i.test(path)) return _
     if (path.startsWith('http')) return _
-    return `](#/v1.0/${path})`
+    return `](#/${version}/${path})`
   })
 }
 
 const html = computed(() => {
+  const version = getVersionFromPath(route.path)
   let key
-  if (route.path === '/v1.0/') {
-    key = '../../v1.0/index.md'
+  if (route.path === `/${version}/`) {
+    key = `../../${version}/index.md`
   } else {
-    key = `../../v1.0/${route.params.page}.md`
+    key = `../../${version}/${route.params.page}.md`
   }
   const raw = mdModules[key]
   if (!raw) return '<p>页面未找到</p>'
-  return addHeadingIds(marked.parse(preprocessLinks(raw), { gfm: true, breaks: false }))
+  return addHeadingIds(marked.parse(preprocessLinks(raw, version), { gfm: true, breaks: false }))
 })
 
 watch([() => route.hash, html], ([hash]) => {

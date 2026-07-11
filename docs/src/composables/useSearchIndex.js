@@ -1,31 +1,48 @@
+import { availableVersions, getVersionFromPath } from './useVersion.js'
+
 const mdModules = import.meta.glob(
-  ['../../v1.0/*.md'],
+  ['../../*/*.md'],
   { query: '?raw', import: 'default', eager: true }
 )
 
-const pages = []
+function buildPages(version) {
+  const prefix = `../../${version}/`
+  const pages = []
 
-for (const [key, content] of Object.entries(mdModules)) {
-  const match = key.match(/v1\.0\/(.+)\.md$/)
-  if (!match) continue
-  let slug = match[1]
-  const path = slug === 'index' ? '/v1.0/' : `/v1.0/${slug}`
+  for (const [key, content] of Object.entries(mdModules)) {
+    if (!key.startsWith(prefix)) continue
+    const match = key.match(new RegExp(`${version}/(.+)\\.md$`))
+    if (!match) continue
+    let slug = match[1]
+    const path = slug === 'index' ? `/${version}/` : `/${version}/${slug}`
 
-  const titleMatch = content.match(/^#\s+(.+)$/m)
-  const title = titleMatch ? titleMatch[1] : path
+    const titleMatch = content.match(/^#\s+(.+)$/m)
+    const title = titleMatch ? titleMatch[1] : path
 
-  const headings = []
-  const headingRegex = /^#{2,3}\s+(.+)$/gm
-  let h
-  while ((h = headingRegex.exec(content)) !== null) {
-    headings.push(h[1])
+    const headings = []
+    const headingRegex = /^#{2,3}\s+(.+)$/gm
+    let h
+    while ((h = headingRegex.exec(content)) !== null) {
+      headings.push(h[1])
+    }
+
+    pages.push({ path, title, headings, content })
   }
 
-  pages.push({ path, title, headings, content })
+  return pages
 }
 
-export function search(query) {
+// 为每个可用版本构建页面索引
+const versionPages = {}
+for (const v of availableVersions) {
+  versionPages[v] = buildPages(v)
+}
+
+export function search(query, currentPath) {
   if (!query.trim()) return []
+  const version = currentPath ? getVersionFromPath(currentPath) : availableVersions[0]
+  const pages = versionPages[version] || []
+
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean)
 
   return pages
