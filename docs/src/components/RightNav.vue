@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, onMounted, onUnmounted } from 'vue'
+import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 const route = useRoute()
@@ -47,7 +47,7 @@ function onScroll() {
   }
 }
 
-watch(() => route.path, extract, { immediate: true, flush: 'post' })
+watch(() => route.path, () => nextTick(extract), { immediate: true })
 
 onMounted(() => window.addEventListener('scroll', onScroll, { passive: true }))
 onUnmounted(() => window.removeEventListener('scroll', onScroll))

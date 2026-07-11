@@ -728,43 +728,152 @@ pub fn draw_gaussian_blur(args: &[String]) -> Result<Option<String>, String> {
     let y = clamp(y, 0, canvas.height as i32) as u32;
     let x2 = clamp(x as i32 + w, x as i32, canvas.width as i32) as u32;
     let y2 = clamp(y as i32 + h, y as i32, canvas.height as i32) as u32;
-    let radius: usize = (canvas.size as usize).max(1).min(10);
+    let r: i32 = (canvas.size as i32).max(1).min(10);
 
     let ow = canvas.width as usize;
-    let mut region = vec![0u8; ((y2 - y) as usize) * ((x2 - x) as usize) * 4];
+    let rw = (x2 - x) as usize;
+    let rh = (y2 - y) as usize;
+    let px_count = rw * rh;
+
+    // Step 1: 分离式盒模糊 —— 前缀和 O(W*H)，原算法 O(W*H*r²)
+    let mut buf_a = vec![0u32; px_count * 4];
+    let mut buf_b = vec![0u32; px_count * 4];
+
+    // 拷贝区域像素
     for py in y..y2 {
         for px in x..x2 {
             let si = (py as usize * ow + px as usize) * 4;
-            let di = ((py - y) as usize * (x2 - x) as usize + (px - x) as usize) * 4;
-            region[di..di + 4].copy_from_slice(&canvas.pixels[si..si + 4]);
-        }
-    }
-    let rw = (x2 - x) as usize;
-    let rh = (y2 - y) as usize;
-    for py in 0..rh {
-        for px in 0..rw {
-            let mut sum = [0u32; 4];
-            let mut count = 0u32;
-            let r = radius as i32;
-            for dy in -r..=r {
-                for dx in -r..=r {
-                    let sx = px as i32 + dx;
-                    let sy = py as i32 + dy;
-                    if sx >= 0 && sy >= 0 && sx < rw as i32 && sy < rh as i32 {
-                        let si = (sy as usize * rw + sx as usize) * 4;
-                        for k in 0..4 { sum[k] += region[si + k] as u32; }
-                        count += 1;
-                    }
-                }
-            }
-            let oi = ((y as usize + py) * ow + (x as usize + px)) * 4;
-            for k in 0..4 {
-                canvas.pixels[oi + k] = (sum[k] / count) as u8;
+            let di = ((py - y) as usize * rw + (px - x) as usize) * 4;
+            for c in 0..4 {
+                buf_a[di + c] = canvas.pixels[si + c] as u32;
             }
         }
     }
+
+    // 水平方向模糊: buf_a → buf_b
+    let mut pref = Vec::with_capacity(rw.max(rh) + 1);
+    for row in 0..rh {
+        let ro = row * rw;
+        for c in 0..4 {
+            pref.clear();
+            pref.push(0);
+            for col in 0..rw {
+                pref.push(pref[col] + buf_a[(ro + col) * 4 + c]);
+            }
+            for col in 0..rw {
+                let x1 = (col as i32 - r).max(0) as usize;
+                let x2 = (col as i32 + r).min(rw as i32 - 1) as usize;
+                let count = (x2 - x1 + 1) as u32;
+                let di = (ro + col) * 4 + c;
+                buf_b[di] = (pref[x2 + 1] - pref[x1]) / count;
+            }
+        }
+    }
+
+    // 垂直方向模糊: buf_b → buf_a
+    for col in 0..rw {
+        for c in 0..4 {
+            pref.clear();
+            pref.push(0);
+            for row in 0..rh {
+                pref.push(pref[row] + buf_b[(row * rw + col) * 4 + c]);
+            }
+            for row in 0..rh {
+                let y1 = (row as i32 - r).max(0) as usize;
+                let y2 = (row as i32 + r).min(rh as i32 - 1) as usize;
+                let count = (y2 - y1 + 1) as u32;
+                let di = (row * rw + col) * 4 + c;
+                buf_a[di] = (pref[y2 + 1] - pref[y1]) / count;
+            }
+        }
+    }
+
+    // 写回画布
+    for py in y..y2 {
+        for px in x..x2 {
+            let si = ((py - y) as usize * rw + (px - x) as usize) * 4;
+            let di = (py as usize * ow + px as usize) * 4;
+            for c in 0..4 {
+                canvas.pixels[di + c] = buf_a[si + c] as u8;
+            }
+        }
+    }
+
     set_canvas(&handle, canvas);
     Ok(None)
+}
+
+/// 90° 快速旋转
+fn rotate_90(pixels: &[u8], ow: usize, oh: usize, bg: [u8; 4]) -> Vec<u8> {
+    let nw = oh;
+    let nh = ow;
+    let mut new_pixels = Vec::with_capacity(nw * nh * 4);
+    for _ in 0..nw * nh {
+        new_pixels.extend_from_slice(&bg);
+    }
+    for sy in 0..oh {
+        for sx in 0..ow {
+            let si = (sy * ow + sx) * 4;
+            let alpha = pixels[si + 3];
+            if alpha == 0 { continue; }
+            let dx = oh - 1 - sy;
+            let dy = sx;
+            let di = (dy * nw + dx) * 4;
+            new_pixels[di] = pixels[si];
+            new_pixels[di + 1] = pixels[si + 1];
+            new_pixels[di + 2] = pixels[si + 2];
+            new_pixels[di + 3] = alpha;
+        }
+    }
+    new_pixels
+}
+
+/// 180° 快速旋转
+fn rotate_180(pixels: &[u8], ow: usize, oh: usize, bg: [u8; 4]) -> Vec<u8> {
+    let mut new_pixels = Vec::with_capacity(ow * oh * 4);
+    for _ in 0..ow * oh {
+        new_pixels.extend_from_slice(&bg);
+    }
+    for sy in 0..oh {
+        for sx in 0..ow {
+            let si = (sy * ow + sx) * 4;
+            let alpha = pixels[si + 3];
+            if alpha == 0 { continue; }
+            let dx = ow - 1 - sx;
+            let dy = oh - 1 - sy;
+            let di = (dy * ow + dx) * 4;
+            new_pixels[di] = pixels[si];
+            new_pixels[di + 1] = pixels[si + 1];
+            new_pixels[di + 2] = pixels[si + 2];
+            new_pixels[di + 3] = alpha;
+        }
+    }
+    new_pixels
+}
+
+/// 270° 快速旋转
+fn rotate_270(pixels: &[u8], ow: usize, oh: usize, bg: [u8; 4]) -> Vec<u8> {
+    let nw = oh;
+    let nh = ow;
+    let mut new_pixels = Vec::with_capacity(nw * nh * 4);
+    for _ in 0..nw * nh {
+        new_pixels.extend_from_slice(&bg);
+    }
+    for sy in 0..oh {
+        for sx in 0..ow {
+            let si = (sy * ow + sx) * 4;
+            let alpha = pixels[si + 3];
+            if alpha == 0 { continue; }
+            let dx = sy;
+            let dy = ow - 1 - sx;
+            let di = (dy * nw + dx) * 4;
+            new_pixels[di] = pixels[si];
+            new_pixels[di + 1] = pixels[si + 1];
+            new_pixels[di + 2] = pixels[si + 2];
+            new_pixels[di + 3] = alpha;
+        }
+    }
+    new_pixels
 }
 
 /// 画布.旋转 handle degrees [bgColor]$
@@ -776,59 +885,96 @@ pub fn canvas_rotate(args: &[String]) -> Result<Option<String>, String> {
     }
     let bg = args.get(3).and_then(|s| parse_color(s)).unwrap_or([0, 0, 0, 0]);
 
-    let rad = deg.to_radians();
-    let cos = rad.cos();
-    let sin = rad.sin();
+    let ow = canvas.width as usize;
+    let oh = canvas.height as usize;
 
-    let ow = canvas.width as i32;
-    let oh = canvas.height as i32;
+    // 90° 倍数快速路径 — 无需三角函数
+    let deg_norm = (deg % 360.0 + 360.0) % 360.0;
+    let deg_r = (deg_norm * 1000.0).round() / 1000.0;
+    if deg_r == 90.0 {
+        canvas.pixels = rotate_90(&canvas.pixels, ow, oh, bg);
+        canvas.width = oh as u32;
+        canvas.height = ow as u32;
+        set_canvas(&handle, canvas);
+        return Ok(None);
+    }
+    if deg_r == 180.0 {
+        canvas.pixels = rotate_180(&canvas.pixels, ow, oh, bg);
+        set_canvas(&handle, canvas);
+        return Ok(None);
+    }
+    if deg_r == 270.0 {
+        canvas.pixels = rotate_270(&canvas.pixels, ow, oh, bg);
+        canvas.width = oh as u32;
+        canvas.height = ow as u32;
+        set_canvas(&handle, canvas);
+        return Ok(None);
+    }
 
-    let corners = [(0, 0), (ow, 0), (ow, oh), (0, oh)];
-    let mut min_x = f64::MAX; let mut max_x = f64::MIN;
-    let mut min_y = f64::MAX; let mut max_y = f64::MIN;
+    let rad = deg_norm.to_radians();
+    let cos = rad.cos() as f32;
+    let sin = rad.sin() as f32;
+
+    let ow_i = ow as i32;
+    let oh_i = oh as i32;
+
+    // 计算旋转后包围盒
+    let corners = [(0, 0), (ow_i, 0), (ow_i, oh_i), (0, oh_i)];
+    let mut min_x = f32::MAX; let mut max_x = f32::MIN;
+    let mut min_y = f32::MAX; let mut max_y = f32::MIN;
     for (cx, cy) in &corners {
-        let rx = *cx as f64 * cos - *cy as f64 * sin;
-        let ry = *cx as f64 * sin + *cy as f64 * cos;
+        let cx = *cx as f32;
+        let cy = *cy as f32;
+        let rx = cx * cos - cy * sin;
+        let ry = cx * sin + cy * cos;
         min_x = min_x.min(rx); max_x = max_x.max(rx);
         min_y = min_y.min(ry); max_y = max_y.max(ry);
     }
-    let nw = (max_x - min_x).ceil() as u32;
-    let nh = (max_y - min_y).ceil() as u32;
+    let nw = (max_x - min_x).ceil() as usize;
+    let nh = (max_y - min_y).ceil() as usize;
 
-    let mut new_pixels = vec![bg[0], bg[1], bg[2], bg[3]];
-    let new_len = (nw as usize) * (nh as usize) * 4;
-    new_pixels.resize(new_len, 0);
-    for i in (4..new_len).step_by(4) {
-        new_pixels[i] = bg[0];
-        new_pixels[i + 1] = bg[1];
-        new_pixels[i + 2] = bg[2];
-        new_pixels[i + 3] = bg[3];
+    // 用背景色填充新画布
+    let new_len = nw * nh;
+    let mut new_pixels = Vec::with_capacity(new_len * 4);
+    for _ in 0..new_len {
+        new_pixels.extend_from_slice(&bg);
     }
 
     let off_x = -min_x;
     let off_y = -min_y;
 
-    for sy in 0..oh {
-        for sx in 0..ow {
-            let oi = (sy as usize * ow as usize + sx as usize) * 4;
-            let alpha = canvas.pixels[oi + 3];
-            if alpha == 0 { continue; }
-            let rx = sx as f64 * cos - sy as f64 * sin + off_x;
-            let ry = sx as f64 * sin + sy as f64 * cos + off_y;
-            let dx = rx.round() as i32;
-            let dy = ry.round() as i32;
-            if dx >= 0 && dy >= 0 && (dx as u32) < nw && (dy as u32) < nh {
-                let di = (dy as usize * nw as usize + dx as usize) * 4;
-                new_pixels[di] = canvas.pixels[oi];
-                new_pixels[di + 1] = canvas.pixels[oi + 1];
-                new_pixels[di + 2] = canvas.pixels[oi + 2];
-                new_pixels[di + 3] = canvas.pixels[oi + 3];
+    // 反向映射 + 增量计算 — 每像素只需一次加法，无需三角函数
+    // 逆旋转：sx = (dx-off_x)*cos + (dy-off_y)*sin,  sy = -(dx-off_x)*sin + (dy-off_y)*cos
+    // 每 dx+1: sx+=cos, sy-=sin
+    for dy in 0..nh {
+        let row_base = dy as f32 - off_y;
+        let mut sx = -off_x * cos + row_base * sin;
+        let mut sy = off_x * sin + row_base * cos;
+        let row_off = dy * nw;
+
+        for dx in 0..nw {
+            if sx >= 0.0 && sy >= 0.0 {
+                let six = sx as usize;
+                let siy = sy as usize;
+                if six < ow && siy < oh {
+                    let si = (siy * ow + six) * 4;
+                    let alpha = canvas.pixels[si + 3];
+                    if alpha != 0 {
+                        let di = (row_off + dx) * 4;
+                        new_pixels[di] = canvas.pixels[si];
+                        new_pixels[di + 1] = canvas.pixels[si + 1];
+                        new_pixels[di + 2] = canvas.pixels[si + 2];
+                        new_pixels[di + 3] = alpha;
+                    }
+                }
             }
+            sx += cos;
+            sy -= sin;
         }
     }
 
-    canvas.width = nw;
-    canvas.height = nh;
+    canvas.width = nw as u32;
+    canvas.height = nh as u32;
     canvas.pixels = new_pixels;
     set_canvas(&handle, canvas);
     Ok(None)
@@ -1338,27 +1484,39 @@ pub fn draw_flood_fill(args: &[String]) -> Result<Option<String>, String> {
         return Ok(None);
     }
 
-    // BFS flood fill
+    // BFS flood fill — 直接操作像素数组，无需 visited 数组
     use std::collections::VecDeque;
-    let w = canvas.width as i32;
-    let h = canvas.height as i32;
-    let mut visited = vec![false; (w as usize) * (h as usize)];
-    let mut queue = VecDeque::new();
+    let w = canvas.width as usize;
+    let w_i = canvas.width as i32;
+    let h_i = canvas.height as i32;
+    let pixels = &mut canvas.pixels;
+    let mut queue = VecDeque::with_capacity(1024);
+
+    // 填充起点 = 标记已访问
+    let si = (y as usize * w + x as usize) * 4;
+    pixels[si] = fill_color[0];
+    pixels[si + 1] = fill_color[1];
+    pixels[si + 2] = fill_color[2];
+    pixels[si + 3] = fill_color[3];
     queue.push_back((x, y));
-    visited[(y * w + x) as usize] = true;
+
+    let sc = (start_color[0], start_color[1], start_color[2], start_color[3]);
 
     while let Some((px, py)) = queue.pop_front() {
-        canvas.set_pixel(px as u32, py as u32, fill_color);
-
         for (nx, ny) in [(px + 1, py), (px - 1, py), (px, py + 1), (px, py - 1)] {
-            if nx >= 0 && ny >= 0 && nx < w && ny < h {
-                let idx = (ny * w + nx) as usize;
-                if !visited[idx] {
-                    let nc = canvas.get_pixel(nx as u32, ny as u32);
-                    if nc == start_color {
-                        visited[idx] = true;
-                        queue.push_back((nx, ny));
-                    }
+            if nx >= 0 && ny >= 0 && nx < w_i && ny < h_i {
+                let ni = (ny as usize * w + nx as usize) * 4;
+                // 像素仍为起始颜色 = 未访问 → 填充并入队
+                if pixels[ni] == sc.0
+                    && pixels[ni + 1] == sc.1
+                    && pixels[ni + 2] == sc.2
+                    && pixels[ni + 3] == sc.3
+                {
+                    pixels[ni] = fill_color[0];
+                    pixels[ni + 1] = fill_color[1];
+                    pixels[ni + 2] = fill_color[2];
+                    pixels[ni + 3] = fill_color[3];
+                    queue.push_back((nx, ny));
                 }
             }
         }

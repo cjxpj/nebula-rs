@@ -1,6 +1,6 @@
 # 服务器
 
-基础函数 | 共 1 个函数。`$启动服务器$` 启动 TCP/HTTP 双栈服务器，自动检测协议。
+内置函数 | 共 1 个函数。`$启动服务器$` 启动 TCP/HTTP 双栈服务器，自动检测协议。
 
 ### `$启动服务器$` — TCP/HTTP 服务器
 
@@ -136,7 +136,7 @@ $如果 %_路径% == /api/users
   $访问转发 https://backend.internal/api/users$
 ```
 
-> 转发时读取 `_DATA` 变量获取原始请求数据。详见 [@访问](./network#访问转发)。
+> 转发时读取 `_DATA` 变量获取原始请求数据。详见 [@访问](./network#net-访问转发)。
 
 ## TCP 模式
 
@@ -175,4 +175,4 @@ telnet localhost 2323
 
 > 服务器自动检测 HTTP/TCP，HTTP 模式返回标准响应，TCP 模式支持长连接逐行交互。配合 [@访问](./network) 可构建完整 Web 服务。
 
-[← 输出](./output) [对象创建 →](./object)
+[← 输出](./output-print) [对象创建 →](./object)

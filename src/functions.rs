@@ -1991,7 +1991,36 @@ fn random_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
 
 // ==================== @画布 模块 ====================
 
-/// 对 args 做变量替换
+/// 获取画布句柄和参数起始偏移（OOP 兼容）
+/// 返回 (handle, data_start_index)
+/// - 显式句柄模式：args[1] 是句柄 → data_start=2
+/// - OOP 模式：句柄来自 self 变量 → data_start=1
+fn get_canvas_handle_and_offset(ctx: &mut DicContext, args: &[String]) -> (String, usize) {
+    if let Some(h) = args.get(1) {
+        let h = ctx.val.text(h);
+        if !h.is_empty() && h.contains('@') {
+            return (h, 2);
+        }
+    }
+    let handle = ctx.val.p.get_cloned("self");
+    (handle, 1)
+}
+
+/// 对 args 做变量替换，支持 OOP self 模式
+fn resolve_canvas_args(ctx: &mut DicContext, args: &[String]) -> Vec<String> {
+    if args.is_empty() {
+        return vec![];
+    }
+    let (handle, offset) = get_canvas_handle_and_offset(ctx, args);
+    let mut resolved = vec![ctx.val.text(&args[0])];
+    resolved.push(handle);
+    for i in offset..args.len() {
+        resolved.push(ctx.val.text(&args[i]));
+    }
+    resolved
+}
+
+/// 对 args 做变量替换（不插入 self，供不需要 OOP 的函数使用）
 fn resolve_args(ctx: &mut DicContext, args: &[String]) -> Vec<String> {
     args.iter().map(|a| ctx.val.text(a)).collect()
 }
@@ -2025,18 +2054,18 @@ fn canvas_new_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Optio
     }
 }
 
-/// $画布.获取 handle [format]$
+/// $画布.获取 [format]$
 fn canvas_get_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::canvas_get(&resolved) {
         Ok(data) => Some(data),
         Err(e) => canvas_err!(ctx, e),
     }
 }
 
-/// $画笔.设置颜色 handle color$
+/// $画笔.设置颜色 [color]$
 fn canvas_brush_color_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     let handle = resolved.get(1).cloned().unwrap_or_default();
     match canvas::brush_set_color(&resolved) {
         Ok(None) => {
@@ -2052,18 +2081,18 @@ fn canvas_brush_color_fn(ctx: &mut DicContext, args: &[String], _content: &str) 
     }
 }
 
-/// $画笔.获取颜色 [color]$
+/// $画笔.获取颜色$
 fn canvas_brush_get_color_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::brush_get_color(&resolved) {
         Ok(s) => Some(s),
         Err(e) => canvas_err!(ctx, e),
     }
 }
 
-/// $画笔.大小 handle size$
+/// $画笔.大小 [size]$
 fn canvas_brush_size_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     let handle = resolved.get(1).cloned().unwrap_or_default();
     match canvas::brush_set_size(&resolved) {
         Ok(None) => {
@@ -2078,9 +2107,9 @@ fn canvas_brush_size_fn(ctx: &mut DicContext, args: &[String], _content: &str) -
     }
 }
 
-/// $绘制.点 handle x y [color]$
+/// $绘制.点 x y [color]$
 fn canvas_draw_point_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_point(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2088,9 +2117,9 @@ fn canvas_draw_point_fn(ctx: &mut DicContext, args: &[String], _content: &str) -
     }
 }
 
-/// $绘制.线 handle x1 y1 x2 y2 [color]$
+/// $绘制.线 x1 y1 x2 y2 [color]$
 fn canvas_draw_line_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_line(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2098,9 +2127,9 @@ fn canvas_draw_line_fn(ctx: &mut DicContext, args: &[String], _content: &str) ->
     }
 }
 
-/// $绘制.方形 handle x y w h [radius] [color]$
+/// $绘制.方形 x y w h [radius] [color]$
 fn canvas_draw_rect_fill_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_rect_fill(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2108,9 +2137,9 @@ fn canvas_draw_rect_fill_fn(ctx: &mut DicContext, args: &[String], _content: &st
     }
 }
 
-/// $绘制.方形描边 handle x y w h [radius] [color]$
+/// $绘制.方形描边 x y w h [radius] [color]$
 fn canvas_draw_rect_stroke_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_rect_stroke(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2118,9 +2147,9 @@ fn canvas_draw_rect_stroke_fn(ctx: &mut DicContext, args: &[String], _content: &
     }
 }
 
-/// $绘制.椭圆 handle x y w h [color]$
+/// $绘制.椭圆 x y w h [color]$
 fn canvas_draw_ellipse_fill_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_ellipse_fill(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2128,9 +2157,9 @@ fn canvas_draw_ellipse_fill_fn(ctx: &mut DicContext, args: &[String], _content: 
     }
 }
 
-/// $绘制.椭圆描边 handle x y w h [color]$
+/// $绘制.椭圆描边 x y w h [color]$
 fn canvas_draw_ellipse_stroke_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_ellipse_stroke(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2138,9 +2167,9 @@ fn canvas_draw_ellipse_stroke_fn(ctx: &mut DicContext, args: &[String], _content
     }
 }
 
-/// $绘制.圆形 handle cx cy [radius] [startDeg] [endDeg] [color]$
+/// $绘制.圆形 cx cy [radius] [startDeg] [endDeg] [color]$
 fn canvas_draw_pie_fill_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_pie_fill(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2148,9 +2177,9 @@ fn canvas_draw_pie_fill_fn(ctx: &mut DicContext, args: &[String], _content: &str
     }
 }
 
-/// $绘制.圆形描边 handle cx cy [radius] [startDeg] [endDeg] [color]$
+/// $绘制.圆形描边 cx cy [radius] [startDeg] [endDeg] [color]$
 fn canvas_draw_pie_stroke_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_pie_stroke(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2158,9 +2187,9 @@ fn canvas_draw_pie_stroke_fn(ctx: &mut DicContext, args: &[String], _content: &s
     }
 }
 
-/// $绘制.圆弧 handle cx cy radius startDeg endDeg [color]$
+/// $绘制.圆弧 cx cy radius startDeg endDeg [color]$
 fn canvas_draw_arc_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_arc(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2168,9 +2197,9 @@ fn canvas_draw_arc_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> 
     }
 }
 
-/// $绘制.图片 handle srcData x y [alpha]$
+/// $绘制.图片 srcData x y [alpha]$
 fn canvas_draw_image_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_image(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2178,9 +2207,9 @@ fn canvas_draw_image_fn(ctx: &mut DicContext, args: &[String], _content: &str) -
     }
 }
 
-/// $绘制.文本 handle x y text [color] [strokeColor] [strokeWidth]$
+/// $绘制.文本 x y text [color] [strokeColor] [strokeWidth]$
 fn canvas_draw_text_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_text(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2188,9 +2217,9 @@ fn canvas_draw_text_fn(ctx: &mut DicContext, args: &[String], _content: &str) ->
     }
 }
 
-/// $画布.灰度 handle$
+/// $画布.灰度$
 fn canvas_grayscale_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::canvas_grayscale(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2198,9 +2227,9 @@ fn canvas_grayscale_fn(ctx: &mut DicContext, args: &[String], _content: &str) ->
     }
 }
 
-/// $画布.马赛克 handle [blockSize]$
+/// $画布.马赛克 [blockSize]$
 fn canvas_mosaic_all_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::canvas_mosaic_all(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2208,9 +2237,9 @@ fn canvas_mosaic_all_fn(ctx: &mut DicContext, args: &[String], _content: &str) -
     }
 }
 
-/// $绘制.马赛克 handle x y w h$
+/// $绘制.马赛克 x y w h$
 fn canvas_draw_mosaic_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_mosaic(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2218,9 +2247,9 @@ fn canvas_draw_mosaic_fn(ctx: &mut DicContext, args: &[String], _content: &str) 
     }
 }
 
-/// $绘制.高斯模糊 handle x y w h$
+/// $绘制.高斯模糊 x y w h$
 fn canvas_draw_blur_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_gaussian_blur(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2228,9 +2257,9 @@ fn canvas_draw_blur_fn(ctx: &mut DicContext, args: &[String], _content: &str) ->
     }
 }
 
-/// $画布.旋转 handle degrees [bgColor]$
+/// $画布.旋转 degrees [bgColor]$
 fn canvas_rotate_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     let handle = resolved.get(1).cloned().unwrap_or_default();
     match canvas::canvas_rotate(&resolved) {
         Ok(None) => {
@@ -2246,9 +2275,9 @@ fn canvas_rotate_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
     }
 }
 
-/// $画布.圆形 handle radius [bgColor]$
+/// $画布.圆形 radius [bgColor]$
 fn canvas_round_corners_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::canvas_round_corners(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2256,9 +2285,9 @@ fn canvas_round_corners_fn(ctx: &mut DicContext, args: &[String], _content: &str
     }
 }
 
-/// $绘制.喷漆 handle x1 y1 x2 y2 [rangeRadius] [density] [color] [pointRadius]$
+/// $绘制.喷漆 x1 y1 x2 y2 [rangeRadius] [density] [color] [pointRadius]$
 fn canvas_brush_line_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_brush_line(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2266,9 +2295,9 @@ fn canvas_brush_line_fn(ctx: &mut DicContext, args: &[String], _content: &str) -
     }
 }
 
-/// $绘制.波浪 handle x1 y1 x2 y2 [amplitude] [wavelength] [step]$
+/// $绘制.波浪 x1 y1 x2 y2 [amplitude] [wavelength] [step]$
 fn canvas_wave_line_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_wave_line(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2276,9 +2305,9 @@ fn canvas_wave_line_fn(ctx: &mut DicContext, args: &[String], _content: &str) ->
     }
 }
 
-/// $绘制.油漆桶 handle x y [fillColor]$
+/// $绘制.油漆桶 x y [fillColor]$
 fn canvas_flood_fill_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_flood_fill(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2286,9 +2315,9 @@ fn canvas_flood_fill_fn(ctx: &mut DicContext, args: &[String], _content: &str) -
     }
 }
 
-/// $绘制.随机点 handle [dotCount]$
+/// $绘制.随机点 [dotCount]$
 fn canvas_random_dots_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_random_dots(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2296,9 +2325,9 @@ fn canvas_random_dots_fn(ctx: &mut DicContext, args: &[String], _content: &str) 
     }
 }
 
-/// $绘制.随机线条 handle [lineCount]$
+/// $绘制.随机线条 [lineCount]$
 fn canvas_random_lines_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_random_lines(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2306,9 +2335,9 @@ fn canvas_random_lines_fn(ctx: &mut DicContext, args: &[String], _content: &str)
     }
 }
 
-/// $绘制.多边形 handle x,y x,y ... [color]$
+/// $绘制.多边形 x,y x,y ... [color]$
 fn canvas_polygon_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_polygon(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),
@@ -2316,9 +2345,9 @@ fn canvas_polygon_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> O
     }
 }
 
-/// $绘制.多边形描边 handle x,y x,y ... [color]$
+/// $绘制.多边形描边 x,y x,y ... [color]$
 fn canvas_polygon_stroke_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_args(ctx, args);
+    let resolved = resolve_canvas_args(ctx, args);
     match canvas::draw_polygon_stroke(&resolved) {
         Ok(None) => None,
         Ok(Some(s)) => Some(s),

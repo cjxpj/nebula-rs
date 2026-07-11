@@ -18,18 +18,14 @@ export const sidebarGroups = [
       { text: '函数', link: '/v1.0/functions' },
       {
         text: '内置函数',
+        link: '/v1.0/flow-output',
         children: [
           { text: '回调', link: '/v1.0/flow-callback' },
           { text: '主回调', link: '/v1.0/flow-main-callback' },
           { text: '打印', link: '/v1.0/output-print' },
           { text: '打印返回', link: '/v1.0/output-print-return' },
           { text: '服务器', link: '/v1.0/server' },
-          { text: '对象创建', link: '/v1.0/object' }
-        ]
-      },
-      {
-        text: '标准库',
-        children: [
+          { text: '对象创建', link: '/v1.0/object' },
           { text: '字符串', link: '/v1.0/string' },
           { text: '数学', link: '/v1.0/math' },
           { text: '网络', link: '/v1.0/network' },
