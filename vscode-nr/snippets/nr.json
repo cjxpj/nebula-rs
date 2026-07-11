@@ -137,22 +137,22 @@
   "字符串操作": {
     "prefix": "大写",
     "body": ["$$${1:大写} ${2:args}$$"],
-    "description": "字符串操作函数 (#引入=@字符串)"
+    "description": "字符串操作函数（内置）"
   },
   "类型转换": {
     "prefix": "转",
     "body": ["$$${1:转文本} ${2:value}$$"],
-    "description": "类型转换函数 (#引入=@类型)"
+    "description": "类型转换函数（内置）"
   },
   "数学操作": {
     "prefix": "数学",
     "body": ["$$${1:绝对值} ${2:args}$$"],
-    "description": "数学运算函数 (#引入=@数学)"
+    "description": "数学运算函数（内置）"
   },
   "网络访问": {
     "prefix": "创建访问",
     "body": ["$$${1:创建访问} ${2:url}$$"],
-    "description": "创建 HTTP 请求对象 (#引入=@访问)"
+    "description": "创建 HTTP 请求对象（内置）"
   },
   "画布操作": {
     "prefix": "画布",
