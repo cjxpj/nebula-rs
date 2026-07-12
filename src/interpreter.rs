@@ -271,17 +271,6 @@ impl DicContext {
 
             let (v_type, v_prefix, v_suffix) = val_text_test(line);
             if v_type == 6 && !v_prefix.is_empty() && v_suffix.contains("#引入=") && !loaded_pkgs.contains(&v_prefix) {
-                let v_suffix_owned = v_suffix.clone();
-                let processed = self.val.text(&v_suffix_owned);
-                // 剥离 #引入= / #引入*= 前缀，变量值应为路径
-                let _clean_val = if let Some(p) = processed.strip_prefix("#引入=") {
-                    p.trim().to_string()
-                } else if let Some(p) = processed.strip_prefix("#引入*=") {
-                    p.trim().to_string()
-                } else {
-                    processed.clone()
-                };
-
                 loaded_pkgs.insert(v_prefix.clone());
                 // 包名已剥离 . 前缀
                 let pkg_lookup = v_prefix.strip_prefix('.').unwrap_or(&v_prefix);
