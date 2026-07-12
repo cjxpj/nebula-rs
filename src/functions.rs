@@ -55,33 +55,53 @@ fn set_request(handle: &str, req: AccessRequest) {
 
 // ==================== 服务器 OOP 实例 ====================
 
-/// 服务器实例（OOP 风格服务器管理）
-#[derive(Debug, Clone)]
-pub(crate) struct ServerInstance {
-    pub port: String,
-    pub handler_ref: Option<String>,
-    /// 静态文件本地目录路径
-    pub static_dir: Option<String>,
-    /// 静态文件网络路径（URL 前缀），空字符串 = 根路径 "/"
-    pub static_url_path: Option<String>,
-}
-
-static SERVER_STORE: LazyLock<Mutex<HashMap<String, ServerInstance>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-pub(crate) fn get_server(handle: &str) -> Option<ServerInstance> {
-    SERVER_STORE.lock().ok()?.get(handle).cloned()
-}
-
-pub(crate) fn set_server(handle: &str, srv: ServerInstance) {
-    if let Ok(mut store) = SERVER_STORE.lock() {
-        store.insert(handle.to_string(), srv);
-    }
-}
+/// 服务器实例字段键名
+const S_PORT: &str = "port";
+const S_HANDLER: &str = "handler";
+const S_STATIC_DIR: &str = "static_dir";
+const S_STATIC_URL: &str = "static_url";
 
 /// 判断一个 handle 是否为服务器实例
 pub(crate) fn is_server_instance(handle: &str) -> bool {
     handle.starts_with("服务器@")
+}
+
+/// 从变量系统读取服务器实例字段
+fn read_server(ctx: &DicContext, handle: &str) -> Option<ServerData> {
+    let port = ctx.val.p.get_cloned(&format!("{}.{}", handle, S_PORT));
+    if port.is_empty() { return None; }
+    Some(ServerData {
+        port,
+        handler_ref: opt_field(ctx, handle, S_HANDLER),
+        static_dir: opt_field(ctx, handle, S_STATIC_DIR),
+        static_url_path: opt_field(ctx, handle, S_STATIC_URL),
+    })
+}
+
+/// 将服务器实例字段写入变量系统
+fn write_server(ctx: &mut DicContext, handle: &str, srv: &ServerData) {
+    ctx.val.p.set_string(&format!("{}.{}", handle, S_PORT), srv.port.clone());
+    set_opt_field(ctx, handle, S_HANDLER, &srv.handler_ref);
+    set_opt_field(ctx, handle, S_STATIC_DIR, &srv.static_dir);
+    set_opt_field(ctx, handle, S_STATIC_URL, &srv.static_url_path);
+}
+
+fn opt_field(ctx: &DicContext, handle: &str, field: &str) -> Option<String> {
+    let v = ctx.val.p.get_cloned(&format!("{}.{}", handle, field));
+    if v.is_empty() { None } else { Some(v) }
+}
+
+fn set_opt_field(ctx: &mut DicContext, handle: &str, field: &str, val: &Option<String>) {
+    ctx.val.p.set_string(&format!("{}.{}", handle, field), val.clone().unwrap_or_default());
+}
+
+/// 服务器实例数据
+#[derive(Debug, Clone)]
+struct ServerData {
+    port: String,
+    handler_ref: Option<String>,
+    static_dir: Option<String>,
+    static_url_path: Option<String>,
 }
 
 // ==================== 基础模块函数 ====================
@@ -613,16 +633,16 @@ fn print_return_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opt
 
 // ===== 创建服务器 — 创建服务器 OOP 实例，返回句柄 =====
 
-fn create_server_fn(_ctx: &mut DicContext, _args: &[String], _content: &str) -> Option<String> {
+fn create_server_fn(ctx: &mut DicContext, _args: &[String], _content: &str) -> Option<String> {
     let instance_id = next_instance_id();
     let handle = format!("服务器@{}", instance_id);
-    let srv = ServerInstance {
+    let srv = ServerData {
         port: "8080".to_string(),
         handler_ref: None,
         static_dir: None,
         static_url_path: None,
     };
-    set_server(&handle, srv);
+    write_server(ctx, &handle, &srv);
     Some(handle)
 }
 
@@ -630,7 +650,7 @@ fn create_server_fn(_ctx: &mut DicContext, _args: &[String], _content: &str) -> 
 
 /// 服务器.静态 — 配置静态文件目录，由 executor 通过 dispatch_server_method 调用
 pub(crate) fn server_static_method(ctx: &mut DicContext, handle: &str, args: &[String]) -> Option<String> {
-    let Some(mut srv) = get_server(handle) else {
+    let Some(mut srv) = read_server(ctx, handle) else {
         return Some(format!("[错误] {} 服务器实例不存在", ctx.sys.file_location()));
     };
     let dir = args.first().map(|s| s.as_str()).unwrap_or("静态");
@@ -638,13 +658,13 @@ pub(crate) fn server_static_method(ctx: &mut DicContext, handle: &str, args: &[S
     // 第二个参数：网络路径（URL 前缀），留空 = 根路径 "/"
     let url_path = args.get(1).map(|s| ctx.val.text(s)).unwrap_or_default();
     srv.static_url_path = Some(url_path);
-    set_server(handle, srv);
+    write_server(ctx, handle, &srv);
     None
 }
 
 /// 服务器.启动 — 启动服务器监听，由 executor 通过 dispatch_server_method 调用
 pub(crate) fn server_start_method(ctx: &mut DicContext, handle: &str, args: &[String]) -> Option<String> {
-    let Some(srv) = get_server(handle) else {
+    let Some(srv) = read_server(ctx, handle) else {
         return Some(format!("[错误] {} 服务器实例不存在", ctx.sys.file_location()));
     };
 
