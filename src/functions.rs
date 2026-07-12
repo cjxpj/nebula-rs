@@ -3388,6 +3388,45 @@ pub(crate) fn pool_alloc_instance(class_spec: &str) -> String {
     handle
 }
 
+/// 为 #引入 分配包指针，返回 0x 内存地址句柄
+/// class_spec 设为包名，通过池指针可解析回包名，从而在包内搜索方法
+pub(crate) fn pool_alloc_package(pkg_name: &str) -> String {
+    pool_alloc_instance(pkg_name)
+}
+
+/// 在指定包中直接搜索方法/函数（无类名前缀，适用于包指针调用 $pkg.method$）
+/// 先查构造函数（method.初始化 / method.new），再查普通方法
+pub(crate) fn search_pkg_method_direct(
+    pkg: &BuildValue,
+    method: &str,
+) -> Option<(Vec<String>, Vec<String>, Vec<Option<String>>, bool, usize)> {
+    let pfx = format!("{} ", method);
+    let cmt = format!("{}.{}", method, method);
+    // 精确匹配 method 或 method.method，或前缀匹配 "method "
+    for item in &pkg.local_func {
+        if item.trigger == cmt || item.trigger == method || item.trigger.starts_with(&pfx) {
+            let (pnames, pdefaults, pvari) = if item.trigger == cmt || item.trigger == method {
+                (Vec::new(), Vec::new(), false)
+            } else {
+                parse_param_defs(&item.trigger[method.len() + 1..])
+            };
+            return Some((item.text.clone(), pnames, pdefaults, pvari, item.line + 1));
+        }
+    }
+    for item in &pkg.local_static {
+        if item.trigger == cmt || item.trigger == method || item.trigger.starts_with(&pfx) {
+            let (pnames, pdefaults, pvari) = if item.trigger == cmt || item.trigger == method {
+                (Vec::new(), Vec::new(), false)
+            } else {
+                parse_param_defs(&item.trigger[method.len() + 1..])
+            };
+            return Some((item.text.clone(), pnames, pdefaults, pvari, item.line + 1));
+        }
+    }
+    // 模糊搜索
+    fuzzy_search_pkg_method(pkg, method)
+}
+
 /// 注入星引入函数的 head 变量到子上下文（隔离），否则复制父上下文变量
 pub(crate) fn inject_star_import_head_vars(ctx: &DicContext, sub_ctx: &mut DicContext, name: &str) {
     if let Some(pkg_name) = ctx.shared.star_import_funcs.get(name) {

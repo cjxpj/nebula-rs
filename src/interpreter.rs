@@ -274,18 +274,25 @@ impl DicContext {
                 let v_suffix_owned = v_suffix.clone();
                 let processed = self.val.text(&v_suffix_owned);
                 // 剥离 #引入= / #引入*= 前缀，变量值应为路径
-                let clean_val = if let Some(p) = processed.strip_prefix("#引入=") {
+                let _clean_val = if let Some(p) = processed.strip_prefix("#引入=") {
                     p.trim().to_string()
                 } else if let Some(p) = processed.strip_prefix("#引入*=") {
                     p.trim().to_string()
                 } else {
                     processed.clone()
                 };
-                self.val.p.set_string(&v_prefix, clean_val);
 
                 loaded_pkgs.insert(v_prefix.clone());
                 // 包名已剥离 . 前缀
                 let pkg_lookup = v_prefix.strip_prefix('.').unwrap_or(&v_prefix);
+                // #引入 返回指针对象（0x 池句柄），而非路径字符串
+                let handle = crate::functions::pool_alloc_package(pkg_lookup);
+                self.val.p.set_string(&v_prefix, handle);
+                // 从 init_lines 中移除对该变量的旧赋值，防止 exec_init 覆盖池指针
+                shared.init_lines.retain(|line| {
+                    let (t, p, _) = val_text_test(line);
+                    !(t == 6 && p == v_prefix)
+                });
                 if let Some(pkg_bv) = bv.packages.get(pkg_lookup) {
                     // 冲突检测：类名不能和同包函数名相同
                     let mut class_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -1163,7 +1170,8 @@ impl DicContext {
                                 if let Some(dot_pos) = class_spec.rfind('.') {
                                     (Some(class_spec[..dot_pos].to_string()), class_spec[dot_pos+1..].to_string(), true)
                                 } else {
-                                    (None, class_spec, true)
+                                    // class_spec 无点号 → 包指针（来自 #引入），class_spec 即包名
+                                    (Some(class_spec.clone()), class_spec, true)
                                 }
                             } else {
                                 let pure_class = crate::functions::pure_class_name(&resolved_obj);
@@ -1202,6 +1210,25 @@ impl DicContext {
                                     None
                                 })
                                 .or_else(|| {
+                                    // 包指针（oop_class == pkg_name，无实际类名，来自 #引入）：直接在包中搜索
+                                    if let Some(ref pkg_name) = oop_pkg {
+                                        if oop_class == *pkg_name {
+                                            if let Some(pkg) = self.shared.packages.get(pkg_name) {
+                                                // 构造函数搜索
+                                                if let Some((text, _, _)) = crate::functions::search_pkg_ctor(pkg, method) {
+                                                    is_ctor = true;
+                                                    return Some((text, Vec::new(), Vec::new()));
+                                                }
+                                                // 直接方法搜索（无类名前缀）
+                                                if let Some((text, names, defs, _, _)) = crate::functions::search_pkg_method_direct(pkg, method) {
+                                                    param_names = names;
+                                                    param_defaults = defs;
+                                                    return Some((text, Vec::new(), Vec::new()));
+                                                }
+                                            }
+                                            return None;
+                                        }
+                                    }
                                     // 实例来自包（如 "*1"），在包中搜索 "{类}.{方法}"
                                     let class_method = format!("{}.{}", oop_class, method);
                                     // 构造函数优先检测
@@ -1254,7 +1281,8 @@ impl DicContext {
                                     } else {
                                         // oop_pkg 为空（*N 解析后类名无包前缀）：扫描所有包
                                         // 但如果包别名已失效（变量被 0x 覆盖），不执行全包扫描
-                                        if interp_pkg_active {
+                                        // 如果 oop_class 含 %（变量未解析），也不执行
+                                        if interp_pkg_active && !oop_class.contains('%') {
                                         for (_, pkg) in self.shared.packages.iter() {
                                             if let Some((text, names, defs)) = search_pkg_exact(pkg).or_else(|| search_pkg_fuzzy(pkg)) {
                                                 param_names = names;
@@ -1314,12 +1342,18 @@ impl DicContext {
                                 entry(&mut sub_ctx, &code);
                                 // OOP 构造函数：分配实例池，返回 0x 内存地址指针
                                 if is_ctor {
-                                    let class_spec = if let Some(ref pkg) = oop_pkg {
-                                        format!("{}.{}", pkg, oop_class)
-                                    } else if self.shared.packages.get(raw_obj).is_some() {
-                                        format!("{}.{}", raw_obj, oop_class)
+                                    // 包指针（oop_class == pkg_name）时，实际类名是 method 而非 oop_class
+                                    let actual_class = if let Some(ref pkg) = oop_pkg {
+                                        if oop_class == *pkg { method } else { &oop_class }
                                     } else {
-                                        oop_class.to_string()
+                                        &oop_class
+                                    };
+                                    let class_spec = if let Some(ref pkg) = oop_pkg {
+                                        format!("{}.{}", pkg, actual_class)
+                                    } else if self.shared.packages.get(raw_obj).is_some() {
+                                        format!("{}.{}", raw_obj, actual_class)
+                                    } else {
+                                        actual_class.to_string()
                                     };
                                     let handle = crate::functions::pool_alloc_instance(&class_spec);
                                     self.save_ctor_instance_vars(&sub_ctx, &handle);

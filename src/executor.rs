@@ -2000,9 +2000,39 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                     if pkg_alias_active { std::iter::once(raw_obj) } else { std::iter::once("") }
                 ) {
                     if found_result.is_some() || obj.is_empty() { continue; }
-                    // 包别名已失效 → 不应对未知 obj 做全包模糊搜索
+                    // 包别名已失效 → 尝试通过池指针解析包方法，不做全包模糊搜索
                     if !pkg_alias_active {
-                        break;
+                        if let Some((class_spec, _)) = crate::functions::resolve_class_from_pool(obj) {
+                            // class_spec 可能是 "a"（包指针）或 "a.测试"（类实例指针）
+                            let (pkg_name, class_name) = if let Some(dot) = class_spec.rfind('.') {
+                                (&class_spec[..dot], &class_spec[dot + 1..])
+                            } else {
+                                (class_spec.as_str(), "")
+                            };
+                            if let Some(pkg_bv) = ctx.shared.packages.get(pkg_name) {
+                                if class_name.is_empty() {
+                                    // 包指针：直接搜索方法名 / 构造函数
+                                    if let Some((text, line, ctor_name)) = crate::functions::search_pkg_ctor(pkg_bv, method) {
+                                        found_is_ctor = true;
+                                        found_result = Some((text, Vec::new(), Vec::new(), false, line, ctor_name, obj.to_string()));
+                                    }
+                                    if found_result.is_none() {
+                                        if let Some((text, pnames, pdefaults, pvari, line)) = crate::functions::search_pkg_method_direct(pkg_bv, method) {
+                                            let cmt = format!("{}.{}", method, method);
+                                            found_result = Some((text, pnames, pdefaults, pvari, line, cmt, obj.to_string()));
+                                        }
+                                    }
+                                } else {
+                                    // 类实例指针：搜索 Class.method
+                                    let class_qualified = format!("{}.{}", class_name, method);
+                                    if let Some((text, pnames, pdefaults, pvari, line)) = crate::functions::search_pkg_method_exact_or_prefix(pkg_bv, &class_qualified) {
+                                        let qualified = format!("{}.{}", class_name, method);
+                                        found_result = Some((text, pnames, pdefaults, pvari, line, qualified, obj.to_string()));
+                                    }
+                                }
+                            }
+                        }
+                        continue;
                     }
 
                     let pure_class = crate::functions::pure_class_name(obj);
@@ -2233,8 +2263,16 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                     crate::functions::writeback_ptr_vars(ctx, &sub_ctx, &raw_args, &param_names, 0);
                     if found_is_ctor {
                         // OOP 构造函数：分配实例池，返回 0x 内存地址指针
+                        // use_obj 可能是 0x 池指针 → 先从池中解析 class_spec
                         let class_spec = if use_obj.contains('.') {
                             use_obj.clone()
+                        } else if let Some((cs, _)) = crate::functions::resolve_class_from_pool(&use_obj) {
+                            if cs.contains('.') {
+                                cs
+                            } else {
+                                // 包指针（class_spec 即包名）：拼接类名
+                                format!("{}.{}", cs, method)
+                            }
                         } else if ctx.shared.packages.contains_key(raw_obj) {
                             format!("{}.{}", raw_obj, method)
                         } else if ctx.shared.packages.contains_key(&use_obj) {
