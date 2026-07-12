@@ -54,7 +54,7 @@ fn run_batch(file_path: &str) -> Result<(), String> {
     nb.exec_func("main")
         .map(|output| {
             if !output.is_empty() {
-                println!("{}", output);
+                print!("{}", output);
             }
         })
 }
@@ -79,7 +79,7 @@ fn run_repl(file_path: &str) -> Result<(), String> {
         interpreter::entry(&mut nb.ctx, &[line.to_string()]);
         let output = nb.ctx.output.get();
         if !output.is_empty() {
-            println!("{}", output);
+            print!("{}", output);
         }
         nb.ctx.output.clear();
     }

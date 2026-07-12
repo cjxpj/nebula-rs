@@ -1,4 +1,4 @@
-﻿use crate::interpreter::{DicContext, BuiltinFn, entry};
+use crate::interpreter::{DicContext, BuiltinFn, entry};
 use crate::parser::BuildValue;
 use crate::canvas;
 use crate::file_lock;
@@ -197,10 +197,6 @@ pub(crate) fn pure_class_name(raw: &str) -> String {
     raw.rfind('.').map(|p| &raw[p+1..]).unwrap_or(raw).to_string()
 }
 
-/// 检查是否为对象引用（含 . 或 0xN）
-pub(crate) fn is_instance_ref(s: &str) -> bool {
-    s.contains('.') || s.starts_with("0x")
-}
 
 // ==================== 访问请求结构体 ====================
 
@@ -3180,6 +3176,252 @@ fn download_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
         Err(e) => {
             eprintln!("[Nebula] {}", e);
             Some(String::new())
+        }
+    }
+}
+
+// ==================== 共享包搜索辅助函数 ====================
+
+/// 剥离可变参数末尾的 "..."
+pub(crate) fn strip_variadic(p: &str, is_variadic: bool, is_last: bool) -> &str {
+    if is_variadic && is_last && p.len() > 3 {
+        &p[..p.len() - 3]
+    } else {
+        p
+    }
+}
+
+/// 解析函数参数定义，返回 (参数名列表, 默认值列表, 是否可变参数)
+pub(crate) fn parse_param_defs(raw: &str) -> (Vec<String>, Vec<Option<String>>, bool) {
+    let raw_params: Vec<String> = raw.split_whitespace().map(|s| s.to_string()).collect();
+    let is_variadic = raw_params.last().is_some_and(|p| p.ends_with("..."));
+    let mut params = Vec::new();
+    let mut defaults = Vec::new();
+    let last_param = raw_params.last().cloned().unwrap_or_default();
+
+    let has_any_named = raw_params.iter().any(|p| {
+        strip_variadic(p, is_variadic, **p == last_param).contains('=')
+    });
+
+    let effective_count = raw_params.iter().filter(|p| {
+        !(is_variadic && **p == last_param && p.len() <= 3)
+    }).count();
+
+    if has_any_named {
+        for p in &raw_params {
+            let is_last = **p == last_param;
+            if is_variadic && is_last && p.len() <= 3 {
+                continue;
+            }
+            let core = strip_variadic(p, is_variadic, is_last);
+            if let Some(eq_pos) = core.find('=') {
+                let name = core[..eq_pos].to_string();
+                let default = core[eq_pos + 1..].to_string();
+                params.push(name);
+                defaults.push(Some(default));
+            } else {
+                params.push(core.to_string());
+                defaults.push(None);
+            }
+        }
+    } else if effective_count == 1
+        || raw_params.iter().any(|p| {
+            let c = p.chars().next().unwrap_or('_');
+            c.is_ascii_digit()
+        })
+    {
+        for p in &raw_params {
+            let is_last = **p == last_param;
+            if is_variadic && is_last && p.len() <= 3 {
+                continue;
+            }
+            defaults.push(Some(strip_variadic(p, is_variadic, is_last).to_string()));
+        }
+    } else {
+        for p in &raw_params {
+            let is_last = **p == last_param;
+            if is_variadic && is_last && p.len() <= 3 {
+                continue;
+            }
+            let core = strip_variadic(p, is_variadic, is_last);
+            params.push(core.to_string());
+            defaults.push(None);
+        }
+    }
+
+    (params, defaults, is_variadic)
+}
+
+/// 在包中模糊搜索方法：匹配 trigger 为 *.method 或 *.method params 格式
+pub(crate) fn fuzzy_search_pkg_method(
+    pkg: &BuildValue,
+    method: &str,
+) -> Option<(Vec<String>, Vec<String>, Vec<Option<String>>, bool, usize)> {
+    let dot_method = format!(".{}", method);
+    let dot_method_space = format!(".{} ", method);
+    for item in &pkg.local_func {
+        if let Some(dot_pos) = item.trigger.find(&dot_method_space) {
+            if !item.trigger[..dot_pos].contains(' ') {
+                let (pnames, pdefaults, pvari) =
+                    parse_param_defs(&item.trigger[dot_pos + dot_method_space.len()..]);
+                return Some((item.text.clone(), pnames, pdefaults, pvari, item.line + 1));
+            }
+        }
+        if item.trigger.ends_with(&dot_method) {
+            return Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1));
+        }
+    }
+    for item in &pkg.local_static {
+        if let Some(dot_pos) = item.trigger.find(&dot_method_space) {
+            if !item.trigger[..dot_pos].contains(' ') {
+                let (pnames, pdefaults, pvari) =
+                    parse_param_defs(&item.trigger[dot_pos + dot_method_space.len()..]);
+                return Some((item.text.clone(), pnames, pdefaults, pvari, item.line + 1));
+            }
+        }
+        if item.trigger.ends_with(&dot_method) {
+            return Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1));
+        }
+    }
+    None
+}
+
+/// 搜索包中的构造函数（method.初始化 / method.new）
+/// 返回 (text, line, ctor_name) 或 None
+pub(crate) fn search_pkg_ctor(pkg: &BuildValue, method: &str) -> Option<(Vec<String>, usize, String)> {
+    for ctor_suffix in &[".初始化", ".new"] {
+        let ctor_name = format!("{}{}", method, ctor_suffix);
+        for item in &pkg.local_func {
+            if item.trigger == ctor_name {
+                return Some((item.text.clone(), item.line + 1, ctor_name));
+            }
+        }
+        for item in &pkg.local_static {
+            if item.trigger == ctor_name {
+                return Some((item.text.clone(), item.line + 1, ctor_name));
+            }
+        }
+    }
+    None
+}
+
+/// 在包中搜索精确方法或前缀方法（class.method 或 class.method params）
+/// 返回 (text, param_names, defaults, is_variadic, line) 或 None
+pub(crate) fn search_pkg_method_exact_or_prefix(
+    pkg: &BuildValue,
+    class_method: &str,
+) -> Option<(Vec<String>, Vec<String>, Vec<Option<String>>, bool, usize)> {
+    let prefix = format!("{} ", class_method);
+    for item in &pkg.local_func {
+        if item.trigger == class_method {
+            return Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1));
+        }
+        if item.trigger.starts_with(&prefix) {
+            let (names, defs, vari) = parse_param_defs(&item.trigger[prefix.len()..]);
+            return Some((item.text.clone(), names, defs, vari, item.line + 1));
+        }
+    }
+    for item in &pkg.local_static {
+        if item.trigger == class_method {
+            return Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1));
+        }
+        if item.trigger.starts_with(&prefix) {
+            let (names, defs, vari) = parse_param_defs(&item.trigger[prefix.len()..]);
+            return Some((item.text.clone(), names, defs, vari, item.line + 1));
+        }
+    }
+    None
+}
+
+// ==================== 包上下文注入 ====================
+
+/// 将包的 static/func/triggers 注入到子上下文
+pub(crate) fn inject_pkg_context(sub_ctx: &mut DicContext, pkg: &BuildValue) {
+    let mut pkg_static = pkg.local_static.clone();
+    pkg_static.extend(sub_ctx.shared.local_static.clone());
+    let mut pkg_func = pkg.local_func.clone();
+    pkg_func.extend(sub_ctx.shared.local_func.clone());
+    {
+        let sub_shared = Arc::make_mut(&mut sub_ctx.shared);
+        sub_shared.local_static = pkg_static;
+        sub_shared.local_func = pkg_func;
+    }
+    sub_ctx.rebuild_internal_maps();
+    Arc::make_mut(&mut sub_ctx.shared).triggers = pkg.dic.clone();
+}
+
+/// 处理包的 head 变量，注入到子上下文
+pub(crate) fn process_pkg_head_vars(parent_val: &crate::value::DicVal, sub_ctx: &mut DicContext, pkg: &BuildValue, override_prefix: Option<&str>) {
+    for line in &pkg.head {
+        let (v_type, v_prefix, v_suffix) = crate::analyzer::val_text_test(line);
+        if v_type == 6 && !v_prefix.is_empty() {
+            let value = if let Some(pfx) = override_prefix {
+                let override_key = format!("{}.{}", pfx, v_prefix);
+                if let Some(ov) = parent_val.p.get(&override_key) {
+                    let ov_str = ov.display();
+                    if !ov_str.is_empty() && !ov_str.contains('%') { ov_str }
+                    else { sub_ctx.val.text(&v_suffix) }
+                } else if let Some(ov) = parent_val.get_g(&override_key) {
+                    let ov_str = ov.display();
+                    if !ov_str.is_empty() && !ov_str.contains('%') { ov_str }
+                    else { sub_ctx.val.text(&v_suffix) }
+                } else {
+                    sub_ctx.val.text(&v_suffix)
+                }
+            } else {
+                sub_ctx.val.text(&v_suffix)
+            };
+            sub_ctx.val.p.set_string(&v_prefix, value.clone());
+            sub_ctx.val.set_g_string(&v_prefix, value);
+        }
+    }
+}
+
+/// 分配 OOP 类实例池，返回 0x 内存地址句柄
+pub(crate) fn pool_alloc_instance(class_spec: &str) -> String {
+    let class_id = pool_alloc_class(ClassInstance {
+        class_spec: class_spec.to_string(),
+        instance_key: String::new(),
+    });
+    let handle = format!("{:#x}", class_id);
+    pool_with_class(class_id, |ci| ci.instance_key = handle.clone());
+    handle
+}
+
+/// 注入星引入函数的 head 变量到子上下文（隔离），否则复制父上下文变量
+pub(crate) fn inject_star_import_head_vars(ctx: &DicContext, sub_ctx: &mut DicContext, name: &str) {
+    if let Some(pkg_name) = ctx.shared.star_import_funcs.get(name) {
+        if let Some(pkg_bv) = ctx.shared.packages.get(pkg_name) {
+            for line in &pkg_bv.head {
+                let (v_type, v_prefix, v_suffix) = crate::analyzer::val_text_test(line);
+                if v_type == 6 && !v_prefix.is_empty() {
+                    let value = sub_ctx.val.text(&v_suffix);
+                    sub_ctx.val.p.set_string(&v_prefix, value);
+                }
+            }
+        }
+    } else {
+        for (key, val) in ctx.val.p.obj.iter() {
+            sub_ctx.val.p.set_string(key, val.display());
+        }
+    }
+}
+
+/// 指针变量回写：将 %var% 形式传入的参数在子上下文修改后的值回写到父上下文的 *var
+pub(crate) fn writeback_ptr_vars(ctx: &mut DicContext, sub_ctx: &DicContext, raw_args: &[String], param_names: &[String], arg_offset: usize) {
+    for (i, raw_arg) in raw_args.iter().enumerate() {
+        if raw_arg.starts_with('%') && raw_arg.ends_with('%') && raw_arg.len() > 2 {
+            let var_name = &raw_arg[1..raw_arg.len()-1];
+            let ptr_key = format!("*{}", var_name);
+            if ctx.val.p.get(&ptr_key).is_some() || ctx.val.get_g(&ptr_key).is_some() {
+                if i >= arg_offset {
+                    let idx = i - arg_offset;
+                    if idx < param_names.len() {
+                        let new_val = sub_ctx.val.p.get_cloned(&param_names[idx]);
+                        ctx.val.p.set_string(&ptr_key, new_val);
+                    }
+                }
+            }
         }
     }
 }

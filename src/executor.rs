@@ -1,4 +1,4 @@
-//! AST parser and tree-walking executor for the Nebula DSL.
+﻿//! AST parser and tree-walking executor for the Nebula DSL.
 //! Replaces the ~1200-line state machine in interpreter.rs::entry().
 //!
 //! Modern DSL syntax (replaces the old entry() state machine):
@@ -16,8 +16,6 @@
 //!   Stop:       >终止
 //!   TextBlock:  ''' ... '''
 
-use std::sync::Arc;
-
 use crate::analyzer::val_text_test;
 use crate::ast::*;
 use crate::count;
@@ -25,84 +23,8 @@ use crate::iftext::IfText;
 use crate::interpreter::entry;
 
 /// 解析函数参数定义字符串，检测 ... 可变参数标记
-/// 解析函数参数定义，返回 (参数名列表, 默认值列表, 是否可变参数)
-/// 规则：
-/// - 含 = → 命名参数（如 "num=1"）
-/// - 单个词不含 = → 位置参数默认值（如 "cs"）
-/// - 多个词不含 = → 命名参数（如 "cx cy r"，兼容现有 embed）
-/// 剥离 variadic 参数末尾的 "..."
-fn strip_variadic(p: &str, is_variadic: bool, is_last: bool) -> &str {
-    if is_variadic && is_last && p.len() > 3 {
-        &p[..p.len() - 3]
-    } else {
-        p
-    }
-}
-
-fn parse_param_defs(raw: &str) -> (Vec<String>, Vec<Option<String>>, bool) {
-    let raw_params: Vec<String> = raw.split_whitespace().map(|s| s.to_string()).collect();
-    let is_variadic = raw_params.last().is_some_and(|p| p.ends_with("..."));
-    let mut params = Vec::new();
-    let mut defaults = Vec::new();
-    let last_param = raw_params.last().cloned().unwrap_or_default();
-
-    // 检查是否有任何参数含有 =（显式命名参数定义）
-    let has_any_named = raw_params.iter().any(|p| {
-        strip_variadic(p, is_variadic, **p == last_param).contains('=')
-    });
-
-    // 有效参数数量（不含空的 ...）
-    let effective_count = raw_params.iter().filter(|p| {
-        !(is_variadic && **p == last_param && p.len() <= 3)
-    }).count();
-
-    if has_any_named {
-        // 有 =：按命名参数解析（原有逻辑）
-        for p in &raw_params {
-            let is_last = **p == last_param;
-            if is_variadic && is_last && p.len() <= 3 {
-                continue;
-            }
-            let core = strip_variadic(p, is_variadic, is_last);
-            if let Some(eq_pos) = core.find('=') {
-                let name = core[..eq_pos].to_string();
-                let default = core[eq_pos + 1..].to_string();
-                params.push(name);
-                defaults.push(Some(default));
-            } else {
-                params.push(core.to_string());
-                defaults.push(None);
-            }
-        }
-    } else if effective_count == 1
-        || raw_params.iter().any(|p| {
-            let c = p.chars().next().unwrap_or('_');
-            c.is_ascii_digit()
-        })
-    {
-        // 单个词 或 含数字开头 → 位置参数默认值，不作为命名参数
-        for p in &raw_params {
-            let is_last = **p == last_param;
-            if is_variadic && is_last && p.len() <= 3 {
-                continue;
-            }
-            defaults.push(Some(strip_variadic(p, is_variadic, is_last).to_string()));
-        }
-    } else {
-        // 多个词无 =：按命名参数解析（兼容现有 embed 文件如 "cx cy r"）
-        for p in &raw_params {
-            let is_last = **p == last_param;
-            if is_variadic && is_last && p.len() <= 3 {
-                continue;
-            }
-            let core = strip_variadic(p, is_variadic, is_last);
-            params.push(core.to_string());
-            defaults.push(None);
-        }
-    }
-
-    (params, defaults, is_variadic)
-}
+use crate::functions::parse_param_defs;
+use crate::functions::fuzzy_search_pkg_method;
 use crate::interpreter::DicContext;
 
 /* ===================== ExecResult ===================== */
@@ -284,11 +206,21 @@ fn parse_one(lines: &[String], idx: usize, stmts: &mut Vec<Stmt>, line_offset: u
         if let Some(b_close) = line.rfind(']') {
             if b_close + 1 < line.len() && line.as_bytes()[b_close + 1] == b':' {
                 let target = line[..=b_close].to_string();
-                let suffix = line[b_close + 2..].to_string();
-                let expr = parse_assign_expr(&suffix);
+                let is_force_str = b_close + 2 < line.len() && line.as_bytes()[b_close + 2] == b':';
+                let suffix_start = if is_force_str { b_close + 3 } else { b_close + 2 };
+                let suffix = line[suffix_start..].to_string();
+                let (v_type_override, expr) = if is_force_str {
+                    // ::value 强制字符串
+                    (Some(5), Expr::Lit(Value::Str(suffix.clone())))
+                } else {
+                    (None, parse_assign_expr(&suffix))
+                };
+                let op = v_type_override
+                    .and_then(|vt| AssignOp::from_vtype(vt))
+                    .unwrap_or(AssignOp::Set);
                 stmts.push(Stmt::Assign {
                     target,
-                    op: AssignOp::Set,
+                    op,
                     expr,
                 });
                 return Ok(1);
@@ -1892,47 +1824,6 @@ fn exec_foreach(
 }
 
 /// 将包的 static/func/triggers 注入到子上下文
-fn inject_pkg_context(sub_ctx: &mut DicContext, pkg: &crate::parser::BuildValue) {
-    let mut pkg_static = pkg.local_static.clone();
-    pkg_static.extend(sub_ctx.shared.local_static.clone());
-    let mut pkg_func = pkg.local_func.clone();
-    pkg_func.extend(sub_ctx.shared.local_func.clone());
-    {
-        let sub_shared = Arc::make_mut(&mut sub_ctx.shared);
-        sub_shared.local_static = pkg_static;
-        sub_shared.local_func = pkg_func;
-    }
-    sub_ctx.rebuild_internal_maps();
-    Arc::make_mut(&mut sub_ctx.shared).triggers = pkg.dic.clone();
-}
-
-/// 处理包的 head 变量，注入到子上下文
-fn process_pkg_head_vars(parent_val: &crate::value::DicVal, sub_ctx: &mut DicContext, pkg: &crate::parser::BuildValue, override_prefix: Option<&str>) {
-    for line in &pkg.head {
-        let (v_type, v_prefix, v_suffix) = val_text_test(line);
-        if v_type == 6 && !v_prefix.is_empty() {
-            let value = if let Some(pfx) = override_prefix {
-                let override_key = format!("{}.{}", pfx, v_prefix);
-                if let Some(ov) = parent_val.p.get(&override_key) {
-                    let ov_str = ov.display();
-                    if !ov_str.is_empty() && !ov_str.contains('%') { ov_str }
-                    else { sub_ctx.val.text(&v_suffix) }
-                } else if let Some(ov) = parent_val.get_g(&override_key) {
-                    let ov_str = ov.display();
-                    if !ov_str.is_empty() && !ov_str.contains('%') { ov_str }
-                    else { sub_ctx.val.text(&v_suffix) }
-                } else {
-                    sub_ctx.val.text(&v_suffix)
-                }
-            } else {
-                sub_ctx.val.text(&v_suffix)
-            };
-            sub_ctx.val.p.set_string(&v_prefix, value.clone());
-            sub_ctx.val.set_g_string(&v_prefix, value);
-        }
-    }
-}
-
 fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
     // 保存原始参数（含 %var% 模式），用于 OOP 实例变量传播
     let raw_args: Vec<String> = args.to_vec();
@@ -2042,445 +1933,6 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
         return;
     }
 
-    // ===== OOP 调用 (包名.方法名 或 对象.方法名) — 需要特殊注入包上下文 =====
-    if let Some(dot_pos) = name.find('.') {
-        let raw_pkg = &name[..dot_pos];
-        let method = &name[dot_pos + 1..];
-        if !raw_pkg.is_empty() && !method.is_empty() {
-            // ===== 包.类 优先：raw_pkg 是已知包名 → 构造函数 / 包方法 =====
-            if ctx.shared.packages.contains_key(raw_pkg) {
-                let pkg_name = raw_pkg;
-                // 1. 构造器检测（类名.初始化 / 类名.new）
-                let ctor_info = ctx.shared.packages.get(pkg_name).and_then(|pkg| {
-                    for ctor_suffix in &[".初始化", ".new"] {
-                        let ctor_name = format!("{}{}", method, ctor_suffix);
-                        for item in &pkg.local_func {
-                            if item.trigger == ctor_name {
-                                return Some((item.text.clone(), ctor_name, item.line + 1));
-                            }
-                        }
-                        for item in &pkg.local_static {
-                            if item.trigger == ctor_name {
-                                return Some((item.text.clone(), ctor_name, item.line + 1));
-                            }
-                        }
-                    }
-                    None
-                });
-                if let Some((code, ctor_name, func_line)) = ctor_info {
-                    let class_spec = format!("{}.{}", pkg_name, method);
-                    let mut sub_ctx = ctx.fresh_sub_context();
-                    sub_ctx.sys.line_offset = func_line;
-                    sub_ctx.sys.source_file = ctx.sys.source_file.clone();
-                    if let Some(pkg) = ctx.shared.packages.get(raw_pkg) {
-                        inject_pkg_context(&mut sub_ctx, pkg);
-                        // 分别执行每个来源文件（分包）的 head
-                        for (_, sub_pkg) in &pkg.sub_packages {
-                            process_pkg_head_vars(&ctx.val, &mut sub_ctx, sub_pkg, Some(pkg_name));
-                        }
-                    }
-                    sub_ctx.val.p.set_string("self", class_spec.clone());
-                    sub_ctx.val.p.set_string("触发", ctor_name.clone());
-                    sub_ctx.val.p.set_string("参数0", ctor_name.clone());
-                    for (i, arg) in args.iter().enumerate() {
-                        sub_ctx.val.p.set_string(&format!("参数{}", i + 1), arg.clone());
-                    }
-                    entry(&mut sub_ctx, &code);
-                    let ctor_output = sub_ctx.output.get();
-                    let class_id = crate::functions::pool_alloc_class(crate::functions::ClassInstance {
-                        class_spec: class_spec.clone(),
-                        instance_key: String::new(), // 下面会更新
-                    });
-                    let handle = format!("{:#x}", class_id);
-                    // 更新 instance_key 为实际 handle
-                    crate::functions::pool_with_class(class_id, |ci| ci.instance_key = handle.clone());
-                    // 持久化实例变量为 0xN.field 键
-                    for (key, val) in sub_ctx.val.p.obj.iter() {
-                        if key.starts_with('.') {
-                            let obj_key = format!("{}.{}", handle, &key[1..]);
-                            ctx.val.p.set_string(&obj_key, val.display());
-                        }
-                    }
-                    // 将实例指针 (*N) 设到输入参数的变量上
-                    let pkg_var = raw_pkg;
-                    let old = ctx.val.p.get_cloned(pkg_var);
-                    crate::functions::track_ptr_assign(&old, &handle);
-                    ctx.val.p.set_string(pkg_var, handle.clone());
-                    ctx.val.set_g_string(pkg_var, handle.clone());
-                    ctx.output.add_string(ctor_output);
-                    ctx.output.add_string(handle);
-                    return;
-                }
-                // 2. 普通包方法
-                let class_method_trigger = format!("{}.{}", method, method);
-                let prefix = format!("{} ", method);
-                if let Some(pkg) = ctx.shared.packages.get(raw_pkg) {
-                    let oop_code = pkg
-                        .local_func
-                        .iter()
-                        .find(|item| item.trigger == class_method_trigger || item.trigger == method || item.trigger.starts_with(&prefix))
-                        .map(|item| {
-                            let (param_names, defaults, is_variadic) = if item.trigger == class_method_trigger {
-                                (Vec::new(), Vec::new(), false)
-                            } else if item.trigger.len() > method.len() + 1 {
-                                parse_param_defs(&item.trigger[method.len() + 1..])
-                            } else {
-                                (Vec::new(), Vec::new(), false)
-                            };
-                            (item.text.clone(), param_names, defaults, is_variadic, item.line + 1)
-                        })
-                        .or_else(|| {
-                            pkg.local_static.iter()
-                                .find(|item| item.trigger == class_method_trigger || item.trigger == method || item.trigger.starts_with(&prefix))
-                                .map(|item| {
-                                    let (param_names, defaults, is_variadic) = if item.trigger == class_method_trigger {
-                                        (Vec::new(), Vec::new(), false)
-                                    } else if item.trigger.len() > method.len() + 1 {
-                                        parse_param_defs(&item.trigger[method.len() + 1..])
-                                    } else {
-                                        (Vec::new(), Vec::new(), false)
-                                    };
-                                    (item.text.clone(), param_names, defaults, is_variadic, item.line + 1)
-                                })
-                        });
-                    if let Some((code, _param_names, defaults, is_variadic, func_line)) = oop_code {
-                        let qualified = format!("{}.{}", pkg_name, method);
-                        let mut sub_ctx = ctx.fresh_sub_context();
-                        sub_ctx.sys.line_offset = func_line;
-                        sub_ctx.sys.source_file = ctx.sys.source_file.clone();
-                        inject_pkg_context(&mut sub_ctx, pkg);
-                        for (_, sub_pkg) in &pkg.sub_packages {
-                            process_pkg_head_vars(&ctx.val, &mut sub_ctx, sub_pkg, Some(pkg_name));
-                        }
-                        sub_ctx.val.p.set_string("self", qualified.clone());
-                        sub_ctx.val.p.set_string("触发", qualified.clone());
-                        sub_ctx.val.p.set_string("参数0", qualified);
-                        // 参数绑定
-                        let all_args: Vec<String> = {
-                            let mut a = vec![method.to_string()];
-                            a.extend(args.iter().cloned());
-                            a
-                        };
-                        // 按位置传参
-                        for (i, val) in args.iter().enumerate() {
-                            let param_name = format!("参数{}", i + 1);
-                            sub_ctx.val.p.set_string(&param_name, val.clone());
-                        }
-                        if is_variadic {
-                            let json_arr = serde_json::to_string(&all_args).unwrap_or_default();
-                            sub_ctx.val.p.set_string("参数", json_arr);
-                        } else if !defaults.is_empty() {
-                            let last_default_idx = defaults.len() - 1;
-                            let excess = all_args.len().saturating_sub(last_default_idx + 1);
-                            let json_arr = serde_json::to_string(&all_args[all_args.len().saturating_sub(excess.saturating_sub(1))..]).unwrap_or_default();
-                            sub_ctx.val.p.set_string("参数", json_arr);
-                        }
-                        entry(&mut sub_ctx, &code);
-                        ctx.output.add_string(sub_ctx.output.get());
-                        return;
-                    }
-                }
-                // 3. 包方法都没找到 → 报错
-                ctx.sys.error = Some(format!(
-                    "[错误] 包 '{}' 没有方法或函数 '{}'", pkg_name, method
-                ));
-                ctx.sys.stop = true;
-                return;
-            }
-            // 非包路径：解析 raw_pkg 为变量 → 实例方法调用
-            let resolved_obj = ctx.val.text(&format!("%{}%", raw_pkg));
-            let raw_obj = if resolved_obj.contains('%') { raw_pkg.to_string() } else { resolved_obj.clone() };
-            let pure_obj = crate::functions::pure_class_name(&raw_obj);
-            let class_method_trigger = format!("{}.{}", pure_obj, method);
-
-            if let Some(pkg) = ctx.shared.packages.get(raw_pkg) {
-                let prefix = format!("{} ", method);
-                // 优先匹配类方法（如 [f:测试]测试 → trigger "测试.测试"），再匹配普通函数
-                let oop_code = pkg
-                    .local_func
-                    .iter()
-                    .find(|item| item.trigger == class_method_trigger || item.trigger == method || item.trigger.starts_with(&prefix))
-                    .map(|item| {
-                        let (param_names, defaults, is_variadic) = if item.trigger == class_method_trigger {
-                            (Vec::new(), Vec::new(), false)
-                        } else if item.trigger.len() > method.len() + 1 {
-                            parse_param_defs(&item.trigger[method.len() + 1..])
-                        } else {
-                            (Vec::new(), Vec::new(), false)
-                        };
-                        (item.text.clone(), param_names, defaults, is_variadic, item.line + 1)
-                    })
-                    .or_else(|| {
-                        pkg.local_static.iter()
-                            .find(|item| item.trigger == class_method_trigger || item.trigger == method || item.trigger.starts_with(&prefix))
-                            .map(|item| {
-                                let (param_names, defaults, is_variadic) = if item.trigger == class_method_trigger {
-                                    (Vec::new(), Vec::new(), false)
-                                } else if item.trigger.len() > method.len() + 1 {
-                                    parse_param_defs(&item.trigger[method.len() + 1..])
-                                } else {
-                                    (Vec::new(), Vec::new(), false)
-                                };
-                                (item.text.clone(), param_names, defaults, is_variadic, item.line + 1)
-                            })
-                    });
-
-                if let Some((code, param_names, defaults, is_variadic, func_line)) = oop_code {
-                    let qualified = format!("{}.{}", raw_pkg, method);
-                    let mut sub_ctx = ctx.fresh_sub_context();
-                    sub_ctx.sys.line_offset = func_line;
-                    sub_ctx.sys.source_file = ctx.sys.source_file.clone();
-
-                    inject_pkg_context(&mut sub_ctx, pkg);
-
-                    // 处理包 head 变量
-                    for line in &pkg.head {
-                        let (v_type, v_prefix, v_suffix) = val_text_test(line);
-                        if v_type == 6 && !v_prefix.is_empty() {
-                            let value = sub_ctx.val.text(&v_suffix);
-                            sub_ctx.val.p.set_string(&v_prefix, value.clone());
-                            sub_ctx.val.set_g_string(&v_prefix, value);
-                        } else if !line.is_empty() && !line.contains("#引入=") {
-                            // 执行非赋值头部行（如 $打印$），每次调用包方法时触发
-                            entry_via_ast(&mut sub_ctx, &vec![line.clone()]);
-                        }
-                    }
-
-                    sub_ctx.val.p.set_string("self", raw_pkg.to_string());
-                    sub_ctx.val.p.set_string("触发", qualified.clone());
-                    sub_ctx.val.p.set_string("参数0", qualified.clone());
-
-                    let has_named_params = !param_names.is_empty();
-                    let arg_count = args.len();
-                    let required_count = defaults.iter().filter(|d| d.is_none()).count();
-                    let valid = if is_variadic {
-                        arg_count >= required_count
-                    } else if has_named_params {
-                        arg_count >= required_count && arg_count <= param_names.len()
-                    } else {
-                        true
-                    };
-
-                    if !valid {
-                        let label = if is_variadic { "至少需要" } else { "需要" };
-                        ctx.sys.error = Some(format!(
-                            "[错误] 函数 '{}' {} {} 个参数，但传入了 {} 个",
-                            qualified, label, required_count, arg_count
-                        ));
-                        return;
-                    }
-                    let var_base = if is_variadic {
-                        param_names.last().cloned()
-                    } else {
-                        None
-                    };
-                    let mut all_vals: Vec<String> = Vec::new();
-
-                    // 注入命名参数（用传入值或默认值）
-                    for i in 0..param_names.len() {
-                        let val = if i < arg_count {
-                            ctx.val.text(&args[i])
-                        } else if let Some(ref d) = defaults[i] {
-                            ctx.val.p.resolve_default(d, has_named_params)
-                        } else {
-                            String::new()
-                        };
-                        all_vals.push(val.clone());
-                        let is_funcptr = i < raw_args.len() && raw_args[i].contains("func@");
-                        if is_funcptr {
-                            sub_ctx.val.p.set_funcptr(&param_names[i], val.clone());
-                        } else {
-                            sub_ctx.val.p.set_string(&param_names[i], val.clone());
-                        }
-                        if is_funcptr {
-                            sub_ctx.val.p.set_funcptr(&format!("参数{}", i + 1), val.clone());
-                        } else {
-                            sub_ctx.val.p.set_string(&format!("参数{}", i + 1), val.clone());
-                        }
-                        if let Some(ref base) = var_base {
-                            sub_ctx.val.p.set_string(&format!("{}{}", base, i + 1), val);
-                        }
-                    }
-                    // 可变参数多余传入值
-                    for i in param_names.len()..arg_count {
-                        let val = ctx.val.text(&args[i]);
-                        all_vals.push(val.clone());
-                        sub_ctx.val.p.set_string(&format!("参数{}", i + 1), val.clone());
-                        if let Some(ref base) = var_base {
-                            sub_ctx.val.p.set_string(&format!("{}{}", base, i + 1), val);
-                        }
-                    }
-                    // 填充位置参数默认值到 %参数N%（param_names 为空时 defaults 仍有值）
-                    for i in arg_count.max(param_names.len())..defaults.len() {
-                        if let Some(ref d) = defaults[i] {
-                            let val = ctx.val.p.resolve_default(d, has_named_params);
-                            all_vals.push(val.clone());
-                            let param_name = format!("参数{}", i + 1);
-                            sub_ctx.val.p.set_string(&param_name, val);
-                        }
-                    }
-                    if let Some(ref base) = var_base {
-                        let json_arr = serde_json::to_string(&all_vals).unwrap_or_default();
-                        sub_ctx.val.p.set_string(base, json_arr);
-                    }
-
-                    // 传播实例变量：对于每个参数值（如果是带 . 的对象引用），从父上下文复制其 .field
-                    for arg_val_str in &all_vals {
-                        if crate::functions::is_instance_ref(arg_val_str) {
-                            let obj_prefix = format!("{}.", arg_val_str);
-                            for (key, val) in ctx.val.p.obj.iter() {
-                                if let Some(field) = key.strip_prefix(&obj_prefix) {
-                                    let dot_key = format!(".{}", field);
-                                    if !sub_ctx.val.p.obj.contains_key(&dot_key) {
-                                        sub_ctx.val.p.set_string(&dot_key, val.display());
-                                    }
-                                    sub_ctx.val.p.set_string(key, val.display());
-                                }
-                            }
-                        }
-                    }
-                    // 从原始 %var% 参数提取变量名，加载对应的实例变量
-                    for raw_arg in &raw_args {
-                        if raw_arg.starts_with('%') && raw_arg.ends_with('%') && raw_arg.len() > 2 {
-                            let var_name = &raw_arg[1..raw_arg.len()-1];
-                            let obj_prefix = format!("{}.", var_name);
-                            for (key, val) in ctx.val.p.obj.iter() {
-                                if let Some(field) = key.strip_prefix(&obj_prefix) {
-                                    let dot_key = format!(".{}", field);
-                                    if !sub_ctx.val.p.obj.contains_key(&dot_key) {
-                                        sub_ctx.val.p.set_string(&dot_key, val.display());
-                                    }
-                                    sub_ctx.val.p.set_string(key, val.display());
-                                }
-                            }
-                        }
-                    }
-
-                    sub_ctx.sys.external_labels = ctx.sys.external_labels
-                        .iter()
-                        .map(|(k, &(idx, d))| (k.clone(), (idx, d + 1)))
-                        .collect();
-                    entry_via_ast(&mut sub_ctx, &code);
-                    // 回传跨函数 goto
-                    if sub_ctx.sys.pending_goto.is_some() {
-                        ctx.sys.pending_goto = sub_ctx.sys.pending_goto.take();
-                        return;
-                    }
-                    // 指针变量回写
-                    for (i, raw_arg) in raw_args.iter().enumerate() {
-                        if raw_arg.starts_with('%') && raw_arg.ends_with('%') && raw_arg.len() > 2 {
-                            let var_name = &raw_arg[1..raw_arg.len()-1];
-                            let ptr_key = format!("*{}", var_name);
-                            if ctx.val.p.get(&ptr_key).is_some() || ctx.val.get_g(&ptr_key).is_some() {
-                                if i < param_names.len() {
-                                    let new_val = sub_ctx.val.p.get_cloned(&param_names[i]);
-                                    ctx.val.p.set_string(&ptr_key, new_val);
-                                }
-                            }
-                        }
-                    }
-                    // 传播实例变量回父上下文：对于每个对象引用参数，回传其 .field
-                    for arg_val_str in &all_vals {
-                        if crate::functions::is_instance_ref(arg_val_str) {
-                            let obj_prefix = format!("{}.", arg_val_str);
-                            for (key, val) in sub_ctx.val.p.obj.iter() {
-                                if key.starts_with(&obj_prefix) {
-                                    ctx.val.p.set_string(key, val.display());
-                                }
-                            }
-                        }
-                    }
-                    // 从原始 %var% 参数提取变量名，回写实例变量
-                    // 需要将子上下文中的 resolved_prefix.field 映射回 var_name.field
-                    for (raw_idx, raw_arg) in raw_args.iter().enumerate() {
-                        if raw_arg.starts_with('%') && raw_arg.ends_with('%') && raw_arg.len() > 2 {
-                            let var_name = &raw_arg[1..raw_arg.len()-1];
-                            let obj_prefix = format!("{}.", var_name);
-                            // 写回 var_name.field（子上下文中直接存储的）
-                            for (key, val) in sub_ctx.val.p.obj.iter() {
-                                if key.starts_with(&obj_prefix) {
-                                    ctx.val.p.set_string(key, val.display());
-                                }
-                            }
-                            // 将子上下文中以 resolved_prefix 开头的实例变量映射到 var_name 前缀
-                            // 例如：*N.count → a.count
-                            if raw_idx < all_vals.len() {
-                                let resolved_val = &all_vals[raw_idx];
-                                if crate::functions::is_instance_ref(resolved_val) {
-                                    let resolved_prefix = format!("{}.", resolved_val);
-                                    for (key, val) in sub_ctx.val.p.obj.iter() {
-                                        if let Some(field) = key.strip_prefix(&resolved_prefix) {
-                                            ctx.val.p.set_string(key, val.display());
-                                            ctx.val.p.set_string(&format!("{}.{}", var_name, field), val.display());
-                                        }
-                                    }
-                                }
-                            }
-                            // 同时将 .field 也复制一份到 var_name.field
-                            for (key, val) in sub_ctx.val.p.obj.iter() {
-                                if let Some(field) = key.strip_prefix('.') {
-                                    ctx.val.p.set_string(&format!("{}.{}", var_name, field), val.display());
-                                }
-                            }
-                        }
-                    }
-                    let out = sub_ctx.output.get();
-                    if !out.is_empty() {
-                        ctx.output.add_string(out);
-                    }
-                    return;
-                }
-
-                // 包名.内置函数名：如 r.打印 / r.主回调（包 triggers 已注入，支持跨包回调）
-                // 若 method 不在 builtins 中，尝试 stdlib 包的 "{module}.{method}" 格式
-                let builtin_key = if ctx.shared.builtins.contains_key(method) {
-                    std::borrow::Cow::Borrowed(method)
-                } else if let Some(module) = pkg.stdlib_module.as_deref() {
-                    std::borrow::Cow::Owned(format!("{}.{}", module, method))
-                } else {
-                    std::borrow::Cow::Borrowed(method)
-                };
-                if let Some(&builtin_fn) = ctx.shared.builtins.get(builtin_key.as_ref()) {
-                    let mut sub_ctx = ctx.clone_for_internal();
-                    inject_pkg_context(&mut sub_ctx, pkg);
-                    process_pkg_head_vars(&ctx.val, &mut sub_ctx, pkg, None);
-
-                    sub_ctx.val.p.set_string("self", raw_pkg.to_string());
-                    let qualified = format!("{}.{}", raw_pkg, method);
-                    sub_ctx.val.p.set_string("触发", qualified.clone());
-                    sub_ctx.val.p.set_string("参数0", qualified);
-                    let sub_content = format!("{} {}", method, args.join(" "));
-                    let sub_args = crate::analyzer::split_with_escape(&sub_content);
-                    // 传递外部标签映射，支持跨函数 goto
-                    sub_ctx.sys.external_labels = ctx.sys.external_labels
-                        .iter()
-                        .map(|(k, &(idx, d))| (k.clone(), (idx, d + 1)))
-                        .collect();
-                    if let Some(output) = builtin_fn(&mut sub_ctx, &sub_args, &sub_content) {
-                        ctx.output.add_string(output);
-                    }
-                    // 回传变量修改（包名.内置函数 支持变量互通）
-                    for (key, val) in sub_ctx.val.p.obj.drain() {
-                        ctx.val.p.set_val(&key, val);
-                    }
-                    // 回传跨函数 goto
-                    if sub_ctx.sys.pending_goto.is_some() {
-                        ctx.sys.pending_goto = sub_ctx.sys.pending_goto.take();
-                    }
-                    return;
-                }
-            }
-        }
-    // 包存在但方法和内置函数都不存在 → 报错
-    if ctx.shared.packages.contains_key(raw_pkg) {
-        let file_info = ctx.sys.file_location();
-        ctx.sys.error = Some(format!(
-            "[错误] {}包 '{}' 没有方法或函数 '{}'",
-            file_info, raw_pkg, method
-        ));
-        return;
-    }
-}
 
 // ===== OOP 变量解析 (x.method → 将 x 作为变量解析为类名) =====
     if let Some(dot_pos) = name.find('.') {
@@ -2501,112 +1953,207 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                     return;
                 }
 
-                let pure_class = crate::functions::pure_class_name(&resolved_obj);
-                let qualified = format!("{}.{}", pure_class, method);
-                // 若 resolved_obj 是 "pkg.Class" 格式 → 拆分为 (pkg, Class)，仅在目标包中搜索
-                let found = if let Some(pkg_dot) = resolved_obj.find('.') {
-                    let pkg_name = &resolved_obj[..pkg_dot];
-                    let class_name = &resolved_obj[pkg_dot + 1..];
-                    let class_qualified = format!("{}.{}", class_name, method);
-                    let cprefix = format!("{} ", class_qualified);
-                    ctx.shared.packages.get(pkg_name).and_then(|pkg_bv| {
-                        for item in &pkg_bv.local_func {
-                            if item.trigger == class_qualified {
-                                return Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1));
-                            }
-                            if item.trigger.starts_with(&cprefix) {
-                                let (pnames, pdefaults, pvari) = parse_param_defs(&item.trigger[cprefix.len()..]);
-                                return Some((item.text.clone(), pnames, pdefaults, pvari, item.line + 1));
-                            }
-                        }
-                        for item in &pkg_bv.local_static {
-                            if item.trigger == class_qualified {
-                                return Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1));
-                            }
-                        }
-                        None
-                    })
-                } else {
-                    None
-                };
-                // 未命中 pkg.Class 路径 → 常规搜索链
-                let found = found.or_else(|| {
-                    ctx
-                        .find_func_prefix(&qualified)
-                        .or_else(|| {
-                            let prefix = format!("{} ", qualified);
-                            for item in &ctx.shared.local_static {
-                                if item.trigger == qualified {
-                                    return Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1));
-                                }
-                                if item.trigger.starts_with(&prefix) {
-                                    let (param_names, defaults, is_variadic) = parse_param_defs(&item.trigger[prefix.len()..]);
-                                    return Some((item.text.clone(), param_names, defaults, is_variadic, item.line + 1));
-                                }
-                            }
-                            None
-                        })
-                        .or_else(|| ctx.find_internal(&qualified).map(|code| (code, Vec::new(), Vec::new(), false, 0)))
-                        .or_else(|| {
-                            let prefix = format!("{} ", qualified);
-                            for (_, pkg_bv) in ctx.shared.packages.iter() {
-                                for item in &pkg_bv.local_func {
-                                    if item.trigger == qualified {
-                                        return Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1));
-                                    }
-                                    if item.trigger.starts_with(&prefix) {
-                                        let (pnames, pdefaults, pvari) = parse_param_defs(&item.trigger[prefix.len()..]);
-                                        return Some((item.text.clone(), pnames, pdefaults, pvari, item.line + 1));
-                                    }
-                                }
-                                for item in &pkg_bv.local_static {
-                                    if item.trigger == qualified {
-                                        return Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1));
-                                    }
-                                }
-                            }
-                            None
-                        })
-                });
-                if let Some((code, param_names, defaults, is_variadic, func_line)) = found {
-                    let mut sub_ctx = ctx.fresh_sub_context();
-                    sub_ctx.sys.line_offset = func_line;
-                    sub_ctx.sys.source_file = ctx.sys.source_file.clone();
-                    // 包上下文注入：如果 resolved_obj 含包名（如 web.Counter），注入包上下文
-                    if let Some(pkg_dot) = resolved_obj.find('.') {
-                        let pkg_name = &resolved_obj[..pkg_dot];
-                        if let Some(pkg_bv) = ctx.shared.packages.get(pkg_name) {
-                            inject_pkg_context(&mut sub_ctx, pkg_bv);
-                            process_pkg_head_vars(&ctx.val, &mut sub_ctx, pkg_bv, Some(&resolved_obj));
-                        }
-                    } else {
-                        // 纯类名（无包前缀）：搜索所有包，注入包含该类的包上下文
-                        let pure_class = crate::functions::pure_class_name(&resolved_obj);
-                        let dot_prefix = format!("{}.", pure_class);
-                        for (_, pkg_bv) in ctx.shared.packages.iter() {
-                            let found_in_pkg = pkg_bv.local_func.iter().any(|item| item.trigger.starts_with(&dot_prefix))
-                                || pkg_bv.local_static.iter().any(|item| item.trigger.starts_with(&dot_prefix));
-                            if found_in_pkg {
-                                inject_pkg_context(&mut sub_ctx, pkg_bv);
-                                process_pkg_head_vars(&ctx.val, &mut sub_ctx, pkg_bv, None);
+                // raw_obj 是已知包别名 → 优先搜该包（含构造函数）
+                // 但如果变量被 0x 池句柄覆盖，则包别名失效（例如 a:0xa 后 $a.测试$ 不再指向包）
+                let resolved_raw = ctx.val.text(&format!("%{}%", raw_obj));
+                let pkg_alias_active = !resolved_raw.starts_with("0x") && !resolved_raw.starts_with("-0x");
+                let mut found_result: Option<(Vec<String>, Vec<String>, Vec<Option<String>>, bool, usize, String, String)> = None;
+                let mut found_is_ctor = false;
+                if pkg_alias_active {
+                    if let Some(raw_pkg) = ctx.shared.packages.get(raw_obj) {
+                    let pfx = format!("{} ", method);
+                    let cmt = format!("{}.{}", method, method);
+                    // 构造函数检测
+                    if let Some((text, line, ctor_name)) = crate::functions::search_pkg_ctor(raw_pkg, method) {
+                        found_is_ctor = true;
+                        found_result = Some((text, Vec::new(), Vec::new(), false, line, ctor_name, raw_obj.to_string()));
+                    }
+                    // 普通方法
+                    if found_result.is_none() {
+                        for item in &raw_pkg.local_func {
+                            if item.trigger == cmt || item.trigger == method || item.trigger.starts_with(&pfx) {
+                                found_result = Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1, cmt.clone(), raw_obj.to_string()));
                                 break;
                             }
                         }
                     }
-                    // 实例变量持久化：将 ctx 中以 "{raw_obj}." 或 "{resolved_obj}." 开头的变量复制到子上下文
-                    // raw_obj 优先，resolved_obj 作为后备（不覆盖已加载的）
-                    for prefix in [&format!("{}.", raw_obj), &format!("{}.", resolved_obj)] {
-                        for (key, val) in ctx.val.p.obj.iter() {
-                            if let Some(field) = key.strip_prefix(prefix.as_str()) {
-                                let dot_key = format!(".{}", field);
-                                if !sub_ctx.val.p.obj.contains_key(&dot_key) {
-                                    sub_ctx.val.p.set_string(&dot_key, val.display());
-                                }
-                                sub_ctx.val.p.set_string(key, val.display());
+                    if found_result.is_none() {
+                        for item in &raw_pkg.local_static {
+                            if item.trigger == cmt || item.trigger == method || item.trigger.starts_with(&pfx) {
+                                found_result = Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1, cmt.clone(), raw_obj.to_string()));
+                                break;
                             }
                         }
                     }
-                    sub_ctx.val.p.set_string("self", resolved_obj.clone());
+                    // 模糊搜索
+                    if found_result.is_none() {
+                        let cmt_clone = cmt.clone();
+                        found_result = fuzzy_search_pkg_method(raw_pkg, method).map(
+                            move |(text, pnames, pdefaults, pvari, line)| (text, pnames, pdefaults, pvari, line, cmt_clone, raw_obj.to_string())
+                        );
+                    }
+                }
+                }
+                // 搜方法：先 resolved_obj，再 raw_obj（回退）
+                // 若包别名已失效（变量被 0x 覆盖），跳过 raw_obj 回退
+                for obj in std::iter::once(resolved_obj.as_str()).chain(
+                    if pkg_alias_active { std::iter::once(raw_obj) } else { std::iter::once("") }
+                ) {
+                    if found_result.is_some() || obj.is_empty() { continue; }
+                    // 包别名已失效 → 不应对未知 obj 做全包模糊搜索
+                    if !pkg_alias_active {
+                        break;
+                    }
+
+                    let pure_class = crate::functions::pure_class_name(obj);
+                    let qualified = format!("{}.{}", pure_class, method);
+                    // 0x 指针 → 从池中获取包名，用于精确定位方法所在包
+                    let pkg_from_pool: Option<String> = crate::functions::resolve_class_from_pool(obj)
+                        .and_then(|(class_spec, _)| class_spec.rfind('.')
+                            .map(|p| class_spec[..p].to_string()));
+                    // 若 obj 是 "pkg.Class" 格式 → 仅在目标包中搜索
+                    let found = if let Some(pkg_dot) = obj.find('.') {
+                        let pkg_name = &obj[..pkg_dot];
+                        let class_name = &obj[pkg_dot + 1..];
+                        let class_qualified = format!("{}.{}", class_name, method);
+                        ctx.shared.packages.get(pkg_name).and_then(|pkg_bv| {
+                            crate::functions::search_pkg_method_exact_or_prefix(pkg_bv, &class_qualified)
+                        })
+                    } else if let Some(ref pkg_name) = pkg_from_pool {
+                        // obj 是 0x 指针 → 从池中获取了包名，直接在该包中搜索
+                        let class_qualified = format!("{}.{}", pure_class, method);
+                        ctx.shared.packages.get(pkg_name.as_str()).and_then(|pkg_bv| {
+                            crate::functions::search_pkg_method_exact_or_prefix(pkg_bv, &class_qualified)
+                        })
+                    } else {
+                        None
+                    };
+                    // 常规搜索链
+                    let found = found.or_else(|| {
+                        ctx
+                            .find_func_prefix(&qualified)
+                            .or_else(|| {
+                                let prefix = format!("{} ", qualified);
+                                for item in &ctx.shared.local_static {
+                                    if item.trigger == qualified {
+                                        return Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1));
+                                    }
+                                    if item.trigger.starts_with(&prefix) {
+                                        let (param_names, defaults, is_variadic) = parse_param_defs(&item.trigger[prefix.len()..]);
+                                        return Some((item.text.clone(), param_names, defaults, is_variadic, item.line + 1));
+                                    }
+                                }
+                                None
+                            })
+                            // obj 是已知包名 → 直接搜方法 / 构造函数
+                            .or_else(|| {
+                                ctx.shared.packages.get(obj).and_then(|pkg_bv| {
+                                    let pfx = format!("{} ", method);
+                                    let cmt = format!("{}.{}", method, method);
+                                    // 1) 构造函数检测（类名.初始化 / 类名.new）
+                                    if let Some((text, line, _ctor_name)) = crate::functions::search_pkg_ctor(pkg_bv, method) {
+                                        found_is_ctor = true;
+                                        return Some((text, Vec::new(), Vec::new(), false, line));
+                                    }
+                                    // 2) 普通方法：类.方法 / 方法 / 方法 params
+                                    for item in &pkg_bv.local_func {
+                                        if item.trigger == cmt || item.trigger == method || item.trigger.starts_with(&pfx) {
+                                            let (pnames, pdefaults, pvari) = if item.trigger == cmt {
+                                                (Vec::new(), Vec::new(), false)
+                                            } else if item.trigger.len() > method.len() + 1 {
+                                                parse_param_defs(&item.trigger[method.len() + 1..])
+                                            } else {
+                                                (Vec::new(), Vec::new(), false)
+                                            };
+                                            return Some((item.text.clone(), pnames, pdefaults, pvari, item.line + 1));
+                                        }
+                                    }
+                                    for item in &pkg_bv.local_static {
+                                        if item.trigger == cmt || item.trigger == method || item.trigger.starts_with(&pfx) {
+                                            let (pnames, pdefaults, pvari) = if item.trigger == cmt {
+                                                (Vec::new(), Vec::new(), false)
+                                            } else if item.trigger.len() > method.len() + 1 {
+                                                parse_param_defs(&item.trigger[method.len() + 1..])
+                                            } else {
+                                                (Vec::new(), Vec::new(), false)
+                                            };
+                                            return Some((item.text.clone(), pnames, pdefaults, pvari, item.line + 1));
+                                        }
+                                    }
+                                    // 3) 模糊搜索：*.method / *.method params
+                                    fuzzy_search_pkg_method(pkg_bv, method)
+                                })
+                            })
+                            .or_else(|| ctx.find_internal(&qualified).map(|code| (code, Vec::new(), Vec::new(), false, 0)))
+                            .or_else(|| {
+                                let prefix = format!("{} ", qualified);
+                                for (_, pkg_bv) in ctx.shared.packages.iter() {
+                                    for item in &pkg_bv.local_func {
+                                        if item.trigger == qualified {
+                                            return Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1));
+                                        }
+                                        if item.trigger.starts_with(&prefix) {
+                                            let (pnames, pdefaults, pvari) = parse_param_defs(&item.trigger[prefix.len()..]);
+                                            return Some((item.text.clone(), pnames, pdefaults, pvari, item.line + 1));
+                                        }
+                                    }
+                                    for item in &pkg_bv.local_static {
+                                        if item.trigger == qualified {
+                                            return Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1));
+                                        }
+                                    }
+                                }
+                                // 模糊搜索所有包
+                                for (_, pkg_bv) in ctx.shared.packages.iter() {
+                                    if let Some(result) = fuzzy_search_pkg_method(pkg_bv, method) {
+                                        return Some(result);
+                                    }
+                                }
+                                None
+                            })
+                    });
+                    if let Some((code, param_names, defaults, is_variadic, func_line)) = found {
+                        found_result = Some((code, param_names, defaults, is_variadic, func_line, qualified, obj.to_string()));
+                    }
+                }
+                if let Some((code, param_names, defaults, is_variadic, func_line, qualified, use_obj)) = found_result {
+                    let mut sub_ctx = ctx.fresh_sub_context();
+                    sub_ctx.sys.line_offset = func_line;
+                    sub_ctx.sys.source_file = ctx.sys.source_file.clone();
+                    // 包上下文注入
+                    if let Some(pkg_dot) = use_obj.find('.') {
+                        let pkg_name = &use_obj[..pkg_dot];
+                        if let Some(pkg_bv) = ctx.shared.packages.get(pkg_name) {
+                            crate::functions::inject_pkg_context(&mut sub_ctx, pkg_bv);
+                            crate::functions::process_pkg_head_vars(&ctx.val, &mut sub_ctx, pkg_bv, Some(&use_obj));
+                        }
+                    } else {
+                        // 0x 指针 → 从池中获取包名，精确定位
+                        let pool_pkg = crate::functions::resolve_class_from_pool(&use_obj)
+                            .and_then(|(class_spec, _)| class_spec.rfind('.')
+                                .map(|p| class_spec[..p].to_string()));
+                        if let Some(ref pkg_name) = pool_pkg {
+                            if let Some(pkg_bv) = ctx.shared.packages.get(pkg_name.as_str()) {
+                                crate::functions::inject_pkg_context(&mut sub_ctx, pkg_bv);
+                                crate::functions::process_pkg_head_vars(&ctx.val, &mut sub_ctx, pkg_bv, None);
+                            }
+                        } else {
+                            let pure_class = crate::functions::pure_class_name(&use_obj);
+                            let dot_prefix = format!("{}.", pure_class);
+                            for (_, pkg_bv) in ctx.shared.packages.iter() {
+                                let found_in_pkg = pkg_bv.local_func.iter().any(|item| item.trigger.starts_with(&dot_prefix))
+                                    || pkg_bv.local_static.iter().any(|item| item.trigger.starts_with(&dot_prefix));
+                                if found_in_pkg {
+                                    crate::functions::inject_pkg_context(&mut sub_ctx, pkg_bv);
+                                    crate::functions::process_pkg_head_vars(&ctx.val, &mut sub_ctx, pkg_bv, None);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // 实例变量持久化
+                    ctx.load_instance_vars(&mut sub_ctx, raw_obj, &resolved_obj);
+                    sub_ctx.val.p.set_string("self", use_obj.clone());
                     sub_ctx.val.p.set_string("触发", qualified.clone());
                     sub_ctx.val.p.set_string("参数0", qualified.clone());
 
@@ -2637,7 +2184,6 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                     };
                     let mut all_vals: Vec<String> = Vec::new();
 
-                    // 注入命名参数（用传入值或默认值）
                     for i in 0..param_names.len() {
                         let val = if i < arg_count {
                             ctx.val.text(&args[i])
@@ -2662,7 +2208,6 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                             sub_ctx.val.p.set_string(&format!("{}{}", base, i + 1), val);
                         }
                     }
-                    // 可变参数多余传入值
                     for i in param_names.len()..arg_count {
                         let val = ctx.val.text(&args[i]);
                         all_vals.push(val.clone());
@@ -2681,49 +2226,43 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                         .map(|(k, &(idx, d))| (k.clone(), (idx, d + 1)))
                         .collect();
                     entry_via_ast(&mut sub_ctx, &code);
-                    // 回传跨函数 goto
                     if sub_ctx.sys.pending_goto.is_some() {
                         ctx.sys.pending_goto = sub_ctx.sys.pending_goto.take();
                         return;
                     }
-                    // 指针变量回写
-                    for (i, raw_arg) in raw_args.iter().enumerate() {
-                        if raw_arg.starts_with('%') && raw_arg.ends_with('%') && raw_arg.len() > 2 {
-                            let var_name = &raw_arg[1..raw_arg.len()-1];
-                            let ptr_key = format!("*{}", var_name);
-                            if ctx.val.p.get(&ptr_key).is_some() || ctx.val.get_g(&ptr_key).is_some() {
-                                if i < param_names.len() {
-                                    let new_val = sub_ctx.val.p.get_cloned(&param_names[i]);
-                                    ctx.val.p.set_string(&ptr_key, new_val);
-                                }
-                            }
+                    crate::functions::writeback_ptr_vars(ctx, &sub_ctx, &raw_args, &param_names, 0);
+                    if found_is_ctor {
+                        // OOP 构造函数：分配实例池，返回 0x 内存地址指针
+                        let class_spec = if use_obj.contains('.') {
+                            use_obj.clone()
+                        } else if ctx.shared.packages.contains_key(raw_obj) {
+                            format!("{}.{}", raw_obj, method)
+                        } else if ctx.shared.packages.contains_key(&use_obj) {
+                            format!("{}.{}", use_obj, method)
+                        } else {
+                            method.to_string()
+                        };
+                        let handle = crate::functions::pool_alloc_instance(&class_spec);
+                        ctx.save_ctor_instance_vars(&sub_ctx, &handle);
+                        // 构造函数：丢弃原始输出，仅返回 0x 指针
+                        ctx.output.add_string(handle);
+                    } else {
+                        ctx.save_instance_vars(&sub_ctx, raw_obj, &resolved_obj);
+                        let out = sub_ctx.output.get();
+                        if !out.is_empty() {
+                            ctx.output.add_string(out);
                         }
-                    }
-                    // 实例变量持久化：将子上下文中的 .field 写回 ctx
-                    for (key, val) in sub_ctx.val.p.obj.iter() {
-                        if let Some(field) = key.strip_prefix('.') {
-                            ctx.val.p.set_string(&format!("{}.{}", raw_obj, field), val.display());
-                            // 同时以 resolved_obj 为前缀持久化，使对象状态可跨调用保持
-                            if raw_obj != resolved_obj {
-                                ctx.val.p.set_string(&format!("{}.{}", resolved_obj, field), val.display());
-                            }
-                        }
-                    }
-                    let out = sub_ctx.output.get();
-                    if !out.is_empty() {
-                        ctx.output.add_string(out);
                     }
                     return;
                 }
-                // 对象已解析但方法未找到且不是内置函数 → 报错
-                if !ctx.shared.builtins.contains_key(method) {
-                    let file_info = ctx.sys.file_location();
-                    ctx.sys.error = Some(format!(
-                        "[错误] {}对象 '{}' 没有方法或函数 '{}'",
-                        file_info, resolved_obj, method
-                    ));
-                    return;
+                // 方法未找到 → 原样输出
+                let args_str = args.join(" ");
+                if args_str.is_empty() {
+                    ctx.output.add_string(format!("${}$", name));
+                } else {
+                    ctx.output.add_string(format!("${} {}$", name, args_str));
                 }
+                return;
             }
         }
     }
@@ -2760,21 +2299,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
         sub_ctx.sys.source_file = ctx.sys.source_file.clone();
 
         // 注入变量：星引入函数用源包的 head 变量（隔离），否则用父上下文变量
-        if let Some(pkg_name) = ctx.shared.star_import_funcs.get(name) {
-            if let Some(pkg_bv) = ctx.shared.packages.get(pkg_name) {
-                for line in &pkg_bv.head {
-                    let (v_type, v_prefix, v_suffix) = val_text_test(line);
-                    if v_type == 6 && !v_prefix.is_empty() {
-                        let value = sub_ctx.val.text(&v_suffix);
-                        sub_ctx.val.p.set_string(&v_prefix, value);
-                    }
-                }
-            }
-        } else {
-            for (key, val) in ctx.val.p.obj.iter() {
-                sub_ctx.val.p.set_string(key, val.display());
-            }
-        }
+        crate::functions::inject_star_import_head_vars(ctx, &mut sub_ctx, name);
 
         // 加载实例变量：
         // 1) ClassName.field → .field（从父上下文加载）
@@ -2917,18 +2442,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                 return;
             }
             // 指针变量回写：若参数来自 %varName% 且 *varName 存在
-            for (i, raw_arg) in raw_args.iter().enumerate() {
-                if raw_arg.starts_with('%') && raw_arg.ends_with('%') && raw_arg.len() > 2 {
-                    let var_name = &raw_arg[1..raw_arg.len()-1];
-                    let ptr_key = format!("*{}", var_name);
-                    if ctx.val.p.get(&ptr_key).is_some() || ctx.val.get_g(&ptr_key).is_some() {
-                        if i < param_names.len() {
-                            let new_val = sub_ctx.val.p.get_cloned(&param_names[i]);
-                            ctx.val.p.set_string(&ptr_key, new_val);
-                        }
-                    }
-                }
-            }
+            crate::functions::writeback_ptr_vars(ctx, &sub_ctx, &raw_args, &param_names, 0);
             // 实例变量持久化：同步子上下文 .field 到当前上下文
             // 上层 OOP 调用会负责 ClassName.field 最终持久化
             for (key, val) in sub_ctx.val.p.obj.iter() {
