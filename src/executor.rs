@@ -814,6 +814,7 @@ fn parse_triple_quote_block(
 
 /// 解析 $函数名 参数1 参数2$ 格式的行
 fn parse_func_call_line(line: &str) -> Option<Stmt> {
+    let line = line.trim_end();
     if !line.starts_with('$') || !line.ends_with('$') {
         return None;
     }
@@ -2004,9 +2005,8 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
     } else if name.starts_with('.') && name.len() > 1 {
         let self_class = ctx.val.p.get_cloned("self");
         if !self_class.is_empty() {
-            // 如果 self 含包名前缀（如 "web.Counter"），只取纯类名
-            let pure_class = self_class.rfind('.').map(|p| &self_class[p+1..]).unwrap_or(&self_class);
-            let pure_class = pure_class.rfind('@').map(|p| &pure_class[..p]).unwrap_or(pure_class);
+            // *N / pkg.ClassName → 纯类名
+            let pure_class = crate::functions::pure_class_name(&self_class);
             name_resolved = std::borrow::Cow::Owned(format!("{}{}", pure_class, name));
             &name_resolved
         } else {
@@ -2087,20 +2087,28 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                     }
                     entry(&mut sub_ctx, &code);
                     let ctor_output = sub_ctx.output.get();
-                    let instance_id = format!("{}@{}", class_spec, crate::functions::next_instance_id());
-                    // 持久化实例变量
+                    let class_id = crate::functions::pool_alloc_class(crate::functions::ClassInstance {
+                        class_spec: class_spec.clone(),
+                        instance_key: String::new(), // 下面会更新
+                    });
+                    let handle = format!("*{}", class_id);
+                    // 更新 instance_key 为实际 handle
+                    crate::functions::pool_with_class(class_id, |ci| ci.instance_key = handle.clone());
+                    // 持久化实例变量为 *N.field 键
                     for (key, val) in sub_ctx.val.p.obj.iter() {
                         if key.starts_with('.') {
-                            let obj_key = format!("{}.{}", instance_id, &key[1..]);
+                            let obj_key = format!("{}.{}", handle, &key[1..]);
                             ctx.val.p.set_string(&obj_key, val.display());
                         }
                     }
-                    // 将实例 ID 同时设到输入参数的变量上
+                    // 将实例指针 (*N) 设到输入参数的变量上
                     let pkg_var = raw_pkg;
-                    ctx.val.p.set_string(pkg_var, instance_id.clone());
-                    ctx.val.set_g_string(pkg_var, instance_id.clone());
+                    let old = ctx.val.p.get_cloned(pkg_var);
+                    crate::functions::track_ptr_assign(&old, &handle);
+                    ctx.val.p.set_string(pkg_var, handle.clone());
+                    ctx.val.set_g_string(pkg_var, handle.clone());
                     ctx.output.add_string(ctor_output);
-                    ctx.output.add_string(instance_id);
+                    ctx.output.add_string(handle);
                     return;
                 }
                 // 2. 普通包方法
@@ -2182,9 +2190,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
             // 非包路径：解析 raw_pkg 为变量 → 实例方法调用
             let resolved_obj = ctx.val.text(&format!("%{}%", raw_pkg));
             let raw_obj = if resolved_obj.contains('%') { raw_pkg.to_string() } else { resolved_obj.clone() };
-            // 剥离实例 ID 后缀（如 "測試@0" → "測試"）和包名前缀
-            let pure_obj = raw_obj.rfind('@').map(|p| &raw_obj[..p]).unwrap_or(&raw_obj);
-            let pure_obj = pure_obj.rfind('.').map(|p| &pure_obj[p+1..]).unwrap_or(pure_obj);
+            let pure_obj = crate::functions::pure_class_name(&raw_obj);
             let class_method_trigger = format!("{}.{}", pure_obj, method);
 
             if let Some(pkg) = ctx.shared.packages.get(raw_pkg) {
@@ -2320,7 +2326,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
 
                     // 传播实例变量：对于每个参数值（如果是带 . 的对象引用），从父上下文复制其 .field
                     for arg_val_str in &all_vals {
-                        if arg_val_str.contains('.') || arg_val_str.contains('@') {
+                        if crate::functions::is_instance_ref(arg_val_str) {
                             let obj_prefix = format!("{}.", arg_val_str);
                             for (key, val) in ctx.val.p.obj.iter() {
                                 if let Some(field) = key.strip_prefix(&obj_prefix) {
@@ -2375,7 +2381,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                     }
                     // 传播实例变量回父上下文：对于每个对象引用参数，回传其 .field
                     for arg_val_str in &all_vals {
-                        if arg_val_str.contains('.') || arg_val_str.contains('@') {
+                        if crate::functions::is_instance_ref(arg_val_str) {
                             let obj_prefix = format!("{}.", arg_val_str);
                             for (key, val) in sub_ctx.val.p.obj.iter() {
                                 if key.starts_with(&obj_prefix) {
@@ -2397,10 +2403,10 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                                 }
                             }
                             // 将子上下文中以 resolved_prefix 开头的实例变量映射到 var_name 前缀
-                            // 例如：Counter@0.count → a.count
+                            // 例如：*N.count → a.count
                             if raw_idx < all_vals.len() {
                                 let resolved_val = &all_vals[raw_idx];
-                                if resolved_val.contains('.') || resolved_val.contains('@') {
+                                if crate::functions::is_instance_ref(resolved_val) {
                                     let resolved_prefix = format!("{}.", resolved_val);
                                     for (key, val) in sub_ctx.val.p.obj.iter() {
                                         if let Some(field) = key.strip_prefix(&resolved_prefix) {
@@ -2495,14 +2501,12 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                     return;
                 }
 
-                let pure_class = resolved_obj.rfind('@').map(|p| &resolved_obj[..p]).unwrap_or(&resolved_obj);
+                let pure_class = crate::functions::pure_class_name(&resolved_obj);
                 let qualified = format!("{}.{}", pure_class, method);
                 // 若 resolved_obj 是 "pkg.Class" 格式 → 拆分为 (pkg, Class)，仅在目标包中搜索
                 let found = if let Some(pkg_dot) = resolved_obj.find('.') {
                     let pkg_name = &resolved_obj[..pkg_dot];
                     let class_name = &resolved_obj[pkg_dot + 1..];
-                    // 剥离实例 ID 后缀（如 "测试@2" → "测试"）
-                    let class_name = class_name.rfind('@').map(|p| &class_name[..p]).unwrap_or(class_name);
                     let class_qualified = format!("{}.{}", class_name, method);
                     let cprefix = format!("{} ", class_qualified);
                     ctx.shared.packages.get(pkg_name).and_then(|pkg_bv| {
@@ -2577,7 +2581,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                         }
                     } else {
                         // 纯类名（无包前缀）：搜索所有包，注入包含该类的包上下文
-                        let pure_class = resolved_obj.rfind('@').map(|p| &resolved_obj[..p]).unwrap_or(&resolved_obj);
+                        let pure_class = crate::functions::pure_class_name(&resolved_obj);
                         let dot_prefix = format!("{}.", pure_class);
                         for (_, pkg_bv) in ctx.shared.packages.iter() {
                             let found_in_pkg = pkg_bv.local_func.iter().any(|item| item.trigger.starts_with(&dot_prefix))

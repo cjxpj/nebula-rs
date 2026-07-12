@@ -7,7 +7,6 @@ use crate::parser::{BuildDic, BuildValue};
 use crate::analyzer::val_text_test;
 use crate::iftext::IfText;
 use crate::file_lock;
-use crate::functions::next_instance_id;
 
 /* ===================== 状态机 ===================== */
 
@@ -919,7 +918,7 @@ impl DicContext {
         None
     }
 
-    /// $包.类 参数$ → OOP 构造函数执行，返回实例 ID（如 a_测试@0）
+    /// $包.类 参数$ → OOP 构造函数执行，返回实例指针（如 *1）
     fn exec_ctor_create(&mut self, pkg: &str, class: &str, ctor_name: &str,
                         code: &[String], func_line: usize, args: &[String]) -> String
     {
@@ -968,11 +967,17 @@ impl DicContext {
 
         entry(&mut sub_ctx, code);
 
-        let instance_id = format!("{}@{}", class_spec, next_instance_id());
+        let class_id = crate::functions::pool_alloc_class(crate::functions::ClassInstance {
+            class_spec: class_spec.clone(),
+            instance_key: String::new(),
+        });
+        let handle = format!("*{}", class_id);
+        // 更新 instance_key 为实际 handle
+        crate::functions::pool_with_class(class_id, |ci| ci.instance_key = handle.clone());
 
         for (key, val) in sub_ctx.val.p.obj.iter() {
             if let Some(field) = key.strip_prefix('.') {
-                self.val.p.set_string(&format!("{}.{}", instance_id, field), val.display());
+                self.val.p.set_string(&format!("{}.{}", handle, field), val.display());
             }
         }
 
@@ -981,7 +986,7 @@ impl DicContext {
             self.output.add(&crate::analyzer::unescape_newline(&output));
         }
 
-        instance_id
+        handle
     }
 
     /// 解析函数参数定义字符串，检测 ... 可变参数标记 和 name=default 默认值
@@ -1219,7 +1224,7 @@ impl DicContext {
                 if !self_class.is_empty() {
                     // 如果 self 含包名前缀（如 "web.Counter"），只取纯类名
                     let pure_class = self_class.rfind('.').map(|p| &self_class[p+1..]).unwrap_or(&self_class);
-                    let pure_class = pure_class.rfind('@').map(|p| &pure_class[..p]).unwrap_or(pure_class);
+                    let pure_class = crate::functions::pure_class_name(pure_class);
                     func_name_resolved = std::borrow::Cow::Owned(format!("{}{}", pure_class, func_name_raw));
                     &func_name_resolved
                 } else {
@@ -1456,7 +1461,7 @@ impl DicContext {
                                     sub_ctx.val.p.set_string(base, json_arr);
                                 }
                                 // 实例变量加载：从父上下文复制对象字段到子上下文
-                                // 1. 从解析后的参数值加载（如 Counter@0.count）
+                                // 1. 从解析后的参数值加载（如 *1.count）
                                 for arg_val in &all_vals {
                                     let obj_prefix = format!("{}.", arg_val);
                                     for (key, val) in self.val.p.obj.iter() {
@@ -1574,12 +1579,12 @@ impl DicContext {
                         } else {
                             // 非包 OOP：解析对象名，查找本地函数
                             let resolved_obj = self.val.text(&format!("%{}%", raw_obj));
-                            let pure_class = resolved_obj.rfind('@').map(|p| &resolved_obj[..p]).unwrap_or(&resolved_obj);
+                            let pure_class = crate::functions::pure_class_name(&resolved_obj);
                             // 分离包名和类名（如 "a.测试" → pkg="a", class="测试"）
-                            let (oop_pkg, oop_class) = if let Some(dot_pos) = pure_class.rfind('.') {
+                            let (oop_pkg, oop_class): (Option<&str>, &str) = if let Some(dot_pos) = pure_class.rfind('.') {
                                 (Some(&pure_class[..dot_pos]), &pure_class[dot_pos+1..])
                             } else {
-                                (None, pure_class)
+                                (None, pure_class.as_str())
                             };
                             let qualified = if resolved_obj.contains('%') {
                                 format!("{}.{}", raw_obj, method)
@@ -1609,32 +1614,45 @@ impl DicContext {
                                     None
                                 })
                                 .or_else(|| {
-                                    // 实例来自包（如 "a.测试@0"），在包中搜索 "{类}.{方法}"
+                                    // 实例来自包（如 "*1"），在包中搜索 "{类}.{方法}"
+                                    let class_method = format!("{}.{}", oop_class, method);
+                                    let cfn_prefix = format!("{} ", class_method);
+                                    let search_pkg = |pkg: &crate::parser::BuildValue| -> Option<_> {
+                                        for item in &pkg.local_func {
+                                            if item.trigger == class_method {
+                                                return Some((item.text.clone(), Vec::new(), Vec::new()));
+                                            }
+                                            if item.trigger.starts_with(&cfn_prefix) {
+                                                let (names, defs, _variadic) = Self::parse_param_defs(&item.trigger[cfn_prefix.len()..]);
+                                                return Some((item.text.clone(), names, defs));
+                                            }
+                                        }
+                                        for item in &pkg.local_static {
+                                            if item.trigger == class_method {
+                                                return Some((item.text.clone(), Vec::new(), Vec::new()));
+                                            }
+                                            if item.trigger.starts_with(&cfn_prefix) {
+                                                let (names, defs, _variadic) = Self::parse_param_defs(&item.trigger[cfn_prefix.len()..]);
+                                                return Some((item.text.clone(), names, defs));
+                                            }
+                                        }
+                                        None
+                                    };
                                     if let Some(pkg_name) = oop_pkg {
                                         if let Some(pkg) = self.shared.packages.get(pkg_name) {
-                                            let class_method = format!("{}.{}", oop_class, method);
-                                            let cfn_prefix = format!("{} ", class_method);
-                                            for item in &pkg.local_func {
-                                                if item.trigger == class_method {
-                                                    return Some((item.text.clone(), Vec::new(), Vec::new()));
-                                                }
-                                                if item.trigger.starts_with(&cfn_prefix) {
-                                                    let (names, defs, _variadic) = Self::parse_param_defs(&item.trigger[cfn_prefix.len()..]);
-                                                    param_names = names;
-                                                    param_defaults = defs;
-                                                    return Some((item.text.clone(), Vec::new(), Vec::new()));
-                                                }
+                                            if let Some((text, names, defs)) = search_pkg(pkg) {
+                                                param_names = names;
+                                                param_defaults = defs;
+                                                return Some((text, Vec::new(), Vec::new()));
                                             }
-                                            for item in &pkg.local_static {
-                                                if item.trigger == class_method {
-                                                    return Some((item.text.clone(), Vec::new(), Vec::new()));
-                                                }
-                                                if item.trigger.starts_with(&cfn_prefix) {
-                                                    let (names, defs, _variadic) = Self::parse_param_defs(&item.trigger[cfn_prefix.len()..]);
-                                                    param_names = names;
-                                                    param_defaults = defs;
-                                                    return Some((item.text.clone(), Vec::new(), Vec::new()));
-                                                }
+                                        }
+                                    } else {
+                                        // oop_pkg 为空（*N 解析后类名无包前缀）：扫描所有包
+                                        for (_, pkg) in self.shared.packages.iter() {
+                                            if let Some((text, names, defs)) = search_pkg(pkg) {
+                                                param_names = names;
+                                                param_defaults = defs;
+                                                return Some((text, Vec::new(), Vec::new()));
                                             }
                                         }
                                     }

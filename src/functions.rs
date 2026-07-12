@@ -8,20 +8,30 @@ use std::io::Read;
 use std::collections::HashMap;
 use std::sync::{Mutex, LazyLock};
 use std::io::Write;
+use rand::Rng;
 
-static INSTANCE_ID: AtomicUsize = AtomicUsize::new(0);
+// 非池用途的简单自增计数器（如 multipart boundary）
+static SEQ_ID: AtomicUsize = AtomicUsize::new(0);
 
-pub(crate) fn next_instance_id() -> usize {
-    INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
+pub(crate) fn next_seq_id() -> usize {
+    SEQ_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-// ==================== 统一实例线程池（带 GC） ====================
+// ==================== 统一实例线程池（随机指针地址，类似 Go 的 allocator 行为） ====================
 
 /// 所有 OOP 实例的枚举
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum Instance {
     Server(ServerData),
     Access(AccessRequest),
+    Class(ClassInstance),
+}
+
+/// 类 OOP 实例数据
+#[derive(Debug, Clone)]
+pub(crate) struct ClassInstance {
+    pub class_spec: String,              // 例如 "web.Counter"
+    pub instance_key: String,            // ctx.val.p 键前缀，例如 "*a3f2c"
 }
 
 /// 池条目：实例数据 + 引用计数
@@ -30,18 +40,27 @@ struct PoolEntry {
     refs: usize,
 }
 
-/// 全局统一实例池（线程安全，带引用计数 GC）
-static INSTANCE_POOL: LazyLock<Mutex<HashMap<usize, PoolEntry>>> =
+/// 全局统一实例池
+static INSTANCE_POOL: LazyLock<Mutex<HashMap<usize, Box<PoolEntry>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 分配实例并返回随机指针地址（Go 风格，不可预测，防枚举攻击）
+fn pool_alloc(inst: Instance) -> usize {
+    let mut rng = rand::thread_rng();
+    let mut pool = INSTANCE_POOL.lock().expect("实例池锁已中毒");
+    loop {
+        let id: usize = rng.gen();
+        if id == 0 { continue; } // 0 无效
+        if let std::collections::hash_map::Entry::Vacant(e) = pool.entry(id) {
+            let entry = Box::new(PoolEntry { inst, refs: 1 });
+            e.insert(entry);
+            return id;
+        }
+    }
+}
 
 fn pool_get(id: usize) -> Option<Instance> {
     INSTANCE_POOL.lock().ok()?.get(&id).map(|e| e.inst.clone())
-}
-
-fn pool_set(id: usize, inst: Instance) {
-    if let Ok(mut pool) = INSTANCE_POOL.lock() {
-        pool.insert(id, PoolEntry { inst, refs: 1 });
-    }
 }
 
 /// 增加引用计数（变量赋值 *N 时调用）
@@ -67,24 +86,6 @@ pub(crate) fn pool_release(id: usize) {
     }
 }
 
-/// GC 清扫：移除所有引用计数为 0 的实例，返回回收数量
-#[allow(dead_code)]
-pub(crate) fn pool_gc() -> usize {
-    if let Ok(mut pool) = INSTANCE_POOL.lock() {
-        let before = pool.len();
-        pool.retain(|_, e| e.refs > 0);
-        before - pool.len()
-    } else {
-        0
-    }
-}
-
-/// 获取池中实例总数
-#[allow(dead_code)]
-pub(crate) fn pool_size() -> usize {
-    INSTANCE_POOL.lock().map(|p| p.len()).unwrap_or(0)
-}
-
 /// 解析 *N 指针，返回实例 ID
 fn parse_ptr(val: &str) -> Option<usize> {
     val.strip_prefix('*').and_then(|n| n.parse::<usize>().ok())
@@ -100,14 +101,6 @@ pub(crate) fn track_ptr_assign(old_val: &str, new_val: &str) {
     }
 }
 
-/// 变量清除追踪
-#[allow(dead_code)]
-pub(crate) fn track_ptr_clear(val: &str) {
-    if let Some(id) = parse_ptr(val) {
-        pool_release(id);
-    }
-}
-
 fn pool_get_server(id: usize) -> Option<ServerData> {
     match pool_get(id)? {
         Instance::Server(s) => Some(s),
@@ -115,8 +108,9 @@ fn pool_get_server(id: usize) -> Option<ServerData> {
     }
 }
 
-fn pool_set_server(id: usize, srv: ServerData) {
-    pool_set(id, Instance::Server(srv));
+/// 分配 Server 实例，返回堆地址
+fn pool_alloc_server(srv: ServerData) -> usize {
+    pool_alloc(Instance::Server(srv))
 }
 
 /// 原子读-改-写：对 pool 中的 Server 执行闭包
@@ -126,7 +120,10 @@ where
 {
     let mut pool = INSTANCE_POOL.lock().ok()?;
     match pool.get_mut(&id) {
-        Some(PoolEntry { inst: Instance::Server(ref mut srv), .. }) => Some(f(srv)),
+        Some(entry) => match &mut entry.inst {
+            Instance::Server(ref mut srv) => Some(f(srv)),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -138,8 +135,9 @@ fn pool_get_access(id: usize) -> Option<AccessRequest> {
     }
 }
 
-fn pool_set_access(id: usize, req: AccessRequest) {
-    pool_set(id, Instance::Access(req));
+/// 分配 Access 实例，返回堆地址
+fn pool_alloc_access(req: AccessRequest) -> usize {
+    pool_alloc(Instance::Access(req))
 }
 
 /// 检查池中是否存在指定 ID 的实例（不克隆）
@@ -154,9 +152,62 @@ where
 {
     let mut pool = INSTANCE_POOL.lock().ok()?;
     match pool.get_mut(&id) {
-        Some(PoolEntry { inst: Instance::Access(ref mut req), .. }) => Some(f(req)),
+        Some(entry) => match &mut entry.inst {
+            Instance::Access(ref mut req) => Some(f(req)),
+            _ => None,
+        },
         _ => None,
     }
+}
+
+pub(crate) fn pool_get_class(id: usize) -> Option<ClassInstance> {
+    match pool_get(id)? {
+        Instance::Class(c) => Some(c),
+        _ => None,
+    }
+}
+
+/// 分配 Class 实例，返回堆地址
+pub(crate) fn pool_alloc_class(inst: ClassInstance) -> usize {
+    pool_alloc(Instance::Class(inst))
+}
+
+/// 原子读-改-写：对 pool 中的 ClassInstance 执行闭包
+pub(crate) fn pool_with_class<F, R>(id: usize, f: F) -> Option<R>
+where
+    F: FnOnce(&mut ClassInstance) -> R,
+{
+    let mut pool = INSTANCE_POOL.lock().ok()?;
+    match pool.get_mut(&id) {
+        Some(entry) => match &mut entry.inst {
+            Instance::Class(ref mut ci) => Some(f(ci)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// 解析 *N 指针 → 从池中获取 class_spec 和 instance_key
+pub(crate) fn resolve_class_from_pool(raw: &str) -> Option<(String, String)> {
+    raw.strip_prefix('*')
+        .and_then(|n| n.parse::<usize>().ok())
+        .and_then(|id| pool_get_class(id))
+        .map(|ci| (ci.class_spec, ci.instance_key))
+}
+
+/// 从字符串中获取纯类名（兼容 *N、pkg.ClassName 格式）
+pub(crate) fn pure_class_name(raw: &str) -> String {
+    // *N → 查 pool
+    if let Some((class_spec, _)) = resolve_class_from_pool(raw) {
+        return class_spec.rfind('.').map(|p| &class_spec[p+1..]).unwrap_or(&class_spec).to_string();
+    }
+    // pkg.ClassName → ClassName
+    raw.rfind('.').map(|p| &raw[p+1..]).unwrap_or(raw).to_string()
+}
+
+/// 检查是否为对象引用（含 . 或 *N）
+pub(crate) fn is_instance_ref(s: &str) -> bool {
+    s.contains('.') || s.starts_with('*')
 }
 
 // ==================== 访问请求结构体 ====================
@@ -685,7 +736,6 @@ fn callback_fn(ctx: &mut DicContext, _args: &[String], content: &str) -> Option<
     // 类作用域查找：self 变量为类名时，先查 ClassName.target，再回退到 target
     let class_name_raw = ctx.val.p.get_cloned("self");
     let class_name = class_name_raw.rfind('.').map(|p| &class_name_raw[p+1..]).unwrap_or(&class_name_raw);
-    let class_name = class_name.rfind('@').map(|p| &class_name[..p]).unwrap_or(class_name);
     let found = if !class_name.is_empty() {
         let qualified = format!("{}.{}", class_name, target);
         ctx.find_internal_regex(&qualified)
@@ -736,14 +786,13 @@ fn print_return_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opt
 // ===== 创建服务器 — 创建服务器 OOP 实例，返回 *指针 =====
 
 fn create_server_fn(_ctx: &mut DicContext, _args: &[String], _content: &str) -> Option<String> {
-    let instance_id = next_instance_id();
     let srv = ServerData {
         port: "8080".to_string(),
         handler_ref: None,
         static_dir: None,
         static_url_path: None,
     };
-    pool_set_server(instance_id, srv);
+    let instance_id = pool_alloc_server(srv);
     Some(format!("*{}", instance_id))
 }
 
@@ -1359,7 +1408,6 @@ fn create_access_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
         return Some(format!("[错误] {} 创建访问 需要 URL", ctx.sys.file_location()));
     }
     let url = ensure_http(url);
-    let instance_id = next_instance_id();
     let req = AccessRequest {
         method: "get".to_string(),
         url,
@@ -1370,7 +1418,7 @@ fn create_access_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
         response: None,
         stop_redirect: false,
     };
-    pool_set_access(instance_id, req);
+    let instance_id = pool_alloc_access(req);
     Some(format!("*{}", instance_id))
 }
 
@@ -1525,7 +1573,7 @@ fn request_send_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opt
             // POST：决定 body 类型
             if !req.files.is_empty() {
                 // multipart 上传
-                let boundary = format!("nebula-boundary-{}", next_instance_id());
+                let boundary = format!("nebula-boundary-{}", next_seq_id());
                 let body_vec = build_multipart_body(&req, &boundary);
                 let body_str = String::from_utf8_lossy(&body_vec).to_string();
                 let mut r = agent.post(&req.url);
@@ -1567,9 +1615,7 @@ fn request_send_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opt
 
     match result() {
         Ok(resp) => {
-            let mut updated = req;
-            updated.response = Some(resp);
-            pool_set_access(id, updated);
+            pool_with_access(id, |req| { req.response = Some(resp); });
             None
         }
         Err(e) => Some(format!("[错误] {} {}", ctx.sys.file_location(), e)),
