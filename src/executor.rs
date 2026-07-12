@@ -2091,10 +2091,10 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                         class_spec: class_spec.clone(),
                         instance_key: String::new(), // 下面会更新
                     });
-                    let handle = format!("*{:#x}", class_id);
+                    let handle = format!("{:#x}", class_id);
                     // 更新 instance_key 为实际 handle
                     crate::functions::pool_with_class(class_id, |ci| ci.instance_key = handle.clone());
-                    // 持久化实例变量为 *N.field 键
+                    // 持久化实例变量为 0xN.field 键
                     for (key, val) in sub_ctx.val.p.obj.iter() {
                         if key.starts_with('.') {
                             let obj_key = format!("{}.{}", handle, &key[1..]);

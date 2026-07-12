@@ -78,9 +78,9 @@ pub(crate) fn pool_release(id: usize) {
     }
 }
 
-/// 解析 *0xN 指针（Go 风格十六进制地址），返回实例 ID
+/// 解析 0xN 指针（十六进制地址），返回实例 ID
 fn parse_ptr(val: &str) -> Option<usize> {
-    let hex = val.strip_prefix("*0x")?;
+    let hex = val.strip_prefix("0x")?;
     usize::from_str_radix(hex, 16).ok()
 }
 
@@ -197,9 +197,9 @@ pub(crate) fn pure_class_name(raw: &str) -> String {
     raw.rfind('.').map(|p| &raw[p+1..]).unwrap_or(raw).to_string()
 }
 
-/// 检查是否为对象引用（含 . 或 *N）
+/// 检查是否为对象引用（含 . 或 0xN）
 pub(crate) fn is_instance_ref(s: &str) -> bool {
-    s.contains('.') || s.starts_with('*')
+    s.contains('.') || s.starts_with("0x")
 }
 
 // ==================== 访问请求结构体 ====================
@@ -228,12 +228,10 @@ struct AccessResponse {
 
 // ==================== 服务器 OOP 实例 ====================
 
-/// 判断一个值是否为服务器实例指针（*N 格式，且在池中存在）
+/// 判断一个值是否为服务器实例指针（0xN 格式，且在池中存在）
 pub(crate) fn is_server_instance(val: &str) -> bool {
-    if let Some(n) = val.strip_prefix('*') {
-        if let Ok(id) = n.parse::<usize>() {
-            return matches!(pool_get(id), Some(Instance::Server(_)));
-        }
+    if let Some(id) = parse_ptr(val) {
+        return matches!(pool_get(id), Some(Instance::Server(_)));
     }
     false
 }
@@ -785,7 +783,7 @@ fn create_server_fn(_ctx: &mut DicContext, _args: &[String], _content: &str) -> 
         static_url_path: None,
     };
     let instance_id = pool_alloc_server(srv);
-    Some(format!("*{:#x}", instance_id))
+    Some(format!("{:#x}", instance_id))
 }
 
 // ===== 服务器实例方法：.静态 和 .启动 =====
@@ -1411,7 +1409,7 @@ fn create_access_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
         stop_redirect: false,
     };
     let instance_id = pool_alloc_access(req);
-    Some(format!("*{:#x}", instance_id))
+    Some(format!("{:#x}", instance_id))
 }
 
 // ===== 访问.切换GET handle$ — 切换为 GET =====
@@ -1866,19 +1864,15 @@ fn request_forward_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> 
 fn get_req_id_and_offset(ctx: &mut DicContext, args: &[String]) -> (usize, usize) {
     if let Some(h) = args.get(1) {
         let h = ctx.val.text(h);
-        if let Some(n) = h.strip_prefix('*') {
-            if let Ok(id) = n.parse::<usize>() {
-                if pool_has(id) {
-                    return (id, 2);
-                }
+        if let Some(id) = parse_ptr(&h) {
+            if pool_has(id) {
+                return (id, 2);
             }
         }
     }
     let handle = ctx.val.p.get_cloned("self");
-    if let Some(n) = handle.strip_prefix('*') {
-        if let Ok(id) = n.parse::<usize>() {
-            return (id, 1);
-        }
+    if let Some(id) = parse_ptr(&handle) {
+        return (id, 1);
     }
     (0, 1)
 }
