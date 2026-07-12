@@ -1760,7 +1760,7 @@ impl DicContext {
                     .or_else(|| self.find_internal(func_name).map(|code| (code, Vec::new(), Vec::new(), false, 0)));
                 if let Some((code, param_names, defaults, is_variadic, func_line)) = found {
                     // 检测自调用（函数递归）：当前 self 与 func_name 相同则保留变量上下文
-                    let is_self = self.val.p.get_cloned("self") == func_name;
+                    let is_self = self.val.p.eq_str("self", func_name);
                     if is_self {
                         // 自调用：保留变量上下文，继承当前所有变量
                         let mut sub_ctx = self.clone_for_internal();
@@ -3257,7 +3257,7 @@ impl Nebula {
                 // （包名已剥离 . 前缀，通过 .{pkg_name} 变量是否存在来判断是否保留）
                 let leaked_pkgs: Vec<String> = self.ctx.shared.packages.keys()
                     .filter(|k| !pre_pkgs.contains(*k) 
-                        && self.ctx.val.p.get_cloned(&format!(".{}", k)).is_empty())
+                        && self.ctx.val.p.is_empty_val(&format!(".{}", k)))
                     .cloned()
                     .collect();
                 for k in &leaked_pkgs {
@@ -3295,7 +3295,7 @@ impl Nebula {
                 entry(&mut self.ctx, &item.text);
                 return Ok(self.ctx.output.get());
             }
-            // 回退：兼容旧逻辑
+            // 无括号捕获的精确匹配
             let escaped = regex::escape(&item.trigger);
             if let Ok(re) = regex::Regex::new(&format!("^{}$", &escaped)) {
                 if re.is_match(trigger) {

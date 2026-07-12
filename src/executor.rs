@@ -1709,8 +1709,16 @@ fn exec_loop(
 
     let max_count = match count {
         Some(expr) => {
-            let val = eval_expr(ctx, expr).unwrap_or(Value::Int(0));
-            val.as_i64() as usize
+            match eval_expr(ctx, expr) {
+                Ok(val) => {
+                    let n = val.as_i64();
+                    if n < 0 { 0 } else { n as usize }
+                }
+                Err(e) => {
+                    ctx.sys.error = Some(e);
+                    0
+                }
+            }
         }
         None => 0, // 0 表示无限循环
     };
@@ -1956,6 +1964,8 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
             // 先查内置函数
             if let Some(&builtin_fn) = ctx.shared.builtins.get(func_name) {
                 if let Some(out) = builtin_fn(ctx, &all_args, &content) {
+                    let old = ctx.val.p.get_cloned(var_name);
+                    crate::functions::track_ptr_assign(&old, &out);
                     ctx.val.p.set_string(var_name, out.clone());
                     ctx.val.set_g_string(var_name, out);
                 }
@@ -1976,6 +1986,8 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                 entry(&mut sub_ctx, &code);
                 let result = sub_ctx.output.get();
                 if !result.is_empty() {
+                    let old = ctx.val.p.get_cloned(var_name);
+                    crate::functions::track_ptr_assign(&old, &result);
                     ctx.val.p.set_string(var_name, result.clone());
                     ctx.val.set_g_string(var_name, result);
                 }
@@ -2004,7 +2016,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
         name
     };
 
-    // 构建完整的 $...$ 内容以兼容旧接口
+    // 构建 $func arg1 arg2$ 格式的 content 参数
     let content = if args.is_empty() {
         name.to_string()
     } else {
@@ -2734,7 +2746,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
 
     if let Some((code, param_names, defaults, is_variadic, func_line)) = found {
         // 检测自调用（递归）：当前 self 与 name 相同则保留变量上下文
-        let is_self = ctx.val.p.get_cloned("self") == name;
+        let is_self = ctx.val.p.eq_str("self", name);
         let mut sub_ctx = if is_self {
             ctx.clone_for_internal()
         } else {
@@ -2963,7 +2975,7 @@ fn entry_via_ast(ctx: &mut DicContext, code: &[String]) {
                 ctx.sys.stop = true;
                 ctx.sys.error = Some(e);
             } else {
-                // 其他解析失败，回退到旧 entry()
+                // 其他解析失败，回退到 entry() 解析
                 crate::interpreter::entry(ctx, code);
             }
         }
@@ -2987,12 +2999,21 @@ fn eval_cond_text(ctx: &mut DicContext, expr: &Expr) -> String {
             }
         }
         Expr::BinOp(left, op, right) => {
-            let l = eval_expr(ctx, left).unwrap_or(Value::Int(0));
-            let r = eval_expr(ctx, right).unwrap_or(Value::Int(0));
+            let l = match eval_expr(ctx, left) {
+                Ok(v) => v,
+                Err(e) => { ctx.sys.error = Some(e); Value::Int(0) }
+            };
+            let r = match eval_expr(ctx, right) {
+                Ok(v) => v,
+                Err(e) => { ctx.sys.error = Some(e); Value::Int(0) }
+            };
             count::compute_bin_op(&l, &r, *op).display()
         }
         Expr::Neg(inner) => {
-            let v = eval_expr(ctx, inner).unwrap_or(Value::Int(0));
+            let v = match eval_expr(ctx, inner) {
+                Ok(v) => v,
+                Err(e) => { ctx.sys.error = Some(e); Value::Int(0) }
+            };
             match v {
                 Value::Int(i) => Value::Int(-i).display(),
                 Value::Float(f) => Value::Float(-f).display(),
@@ -3002,7 +3023,10 @@ fn eval_cond_text(ctx: &mut DicContext, expr: &Expr) -> String {
         Expr::Call { name, args } => {
             let arg_strs: Vec<String> = args
                 .iter()
-                .map(|a| eval_expr(ctx, a).map(|v| v.display()).unwrap_or_default())
+                .map(|a| match eval_expr(ctx, a) {
+                    Ok(v) => v.display(),
+                    Err(e) => { ctx.sys.error = Some(e); String::new() }
+                })
                 .collect();
             let all_args: Vec<String> = {
                 let mut a = vec![name.clone()];
@@ -3081,6 +3105,9 @@ pub fn eval_expr(ctx: &mut DicContext, expr: &Expr) -> Result<Value, String> {
                 let result = ctx.output.get();
                 ctx.output.clear();
                 ctx.output.add_string(saved);
+                if let Some(err) = ctx.sys.error.take() {
+                    return Err(err);
+                }
                 Ok(Value::Str(result))
             }
         }

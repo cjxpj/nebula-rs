@@ -41,6 +41,25 @@ impl Val {
         self.get_display(key)
     }
 
+    /// 零分配：比较变量值是否等于指定字符串
+    pub fn eq_str(&self, key: &str, other: &str) -> bool {
+        self.obj.get(key).map(|v| match v {
+            Value::Str(s) => s == other,
+            Value::Int(i) => i.to_string() == other,
+            _ => false,
+        }).unwrap_or(other.is_empty())
+    }
+
+    /// 零分配：变量值是否为空（无 key / Null / 空串 / "0" → true）
+    pub fn is_empty_val(&self, key: &str) -> bool {
+        self.obj.get(key).map(|v| match v {
+            Value::Str(s) => s.is_empty(),
+            Value::Null => true,
+            Value::Int(0) => true,
+            _ => false,
+        }).unwrap_or(true)
+    }
+
     pub fn set(&mut self, key: &str, value: &str) {
         self.obj.insert(key.to_string(), Value::Str(value.to_string()));
     }
@@ -66,7 +85,7 @@ impl Val {
     }
 
     pub fn set_string(&mut self, key: &str, value: String) {
-        // 兼容旧接口：尝试解析为数字
+        // 自动推断类型：数字 → Int，浮点 → Float，其余 → Str
         if let Ok(i) = value.parse::<i64>() {
             self.obj.insert(key.to_string(), Value::Int(i));
         } else if let Ok(f) = value.parse::<f64>() {

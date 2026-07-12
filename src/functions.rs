@@ -15,6 +15,150 @@ pub(crate) fn next_instance_id() -> usize {
     INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+// ==================== 统一实例线程池（带 GC） ====================
+
+/// 所有 OOP 实例的枚举
+#[derive(Debug, Clone)]
+enum Instance {
+    Server(ServerData),
+    Access(AccessRequest),
+}
+
+/// 池条目：实例数据 + 引用计数
+struct PoolEntry {
+    inst: Instance,
+    refs: usize,
+}
+
+/// 全局统一实例池（线程安全，带引用计数 GC）
+static INSTANCE_POOL: LazyLock<Mutex<HashMap<usize, PoolEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn pool_get(id: usize) -> Option<Instance> {
+    INSTANCE_POOL.lock().ok()?.get(&id).map(|e| e.inst.clone())
+}
+
+fn pool_set(id: usize, inst: Instance) {
+    if let Ok(mut pool) = INSTANCE_POOL.lock() {
+        pool.insert(id, PoolEntry { inst, refs: 1 });
+    }
+}
+
+/// 增加引用计数（变量赋值 *N 时调用）
+pub(crate) fn pool_retain(id: usize) {
+    if let Ok(mut pool) = INSTANCE_POOL.lock() {
+        if let Some(entry) = pool.get_mut(&id) {
+            entry.refs += 1;
+        }
+    }
+}
+
+/// 减少引用计数（变量覆盖/清除时调用），refs 归零则释放
+pub(crate) fn pool_release(id: usize) {
+    if let Ok(mut pool) = INSTANCE_POOL.lock() {
+        if let Some(entry) = pool.get_mut(&id) {
+            if entry.refs > 0 {
+                entry.refs -= 1;
+            }
+            if entry.refs == 0 {
+                pool.remove(&id);
+            }
+        }
+    }
+}
+
+/// GC 清扫：移除所有引用计数为 0 的实例，返回回收数量
+#[allow(dead_code)]
+pub(crate) fn pool_gc() -> usize {
+    if let Ok(mut pool) = INSTANCE_POOL.lock() {
+        let before = pool.len();
+        pool.retain(|_, e| e.refs > 0);
+        before - pool.len()
+    } else {
+        0
+    }
+}
+
+/// 获取池中实例总数
+#[allow(dead_code)]
+pub(crate) fn pool_size() -> usize {
+    INSTANCE_POOL.lock().map(|p| p.len()).unwrap_or(0)
+}
+
+/// 解析 *N 指针，返回实例 ID
+fn parse_ptr(val: &str) -> Option<usize> {
+    val.strip_prefix('*').and_then(|n| n.parse::<usize>().ok())
+}
+
+/// 变量赋值追踪：释放旧指针，持有新指针
+pub(crate) fn track_ptr_assign(old_val: &str, new_val: &str) {
+    if let Some(id) = parse_ptr(old_val) {
+        pool_release(id);
+    }
+    if let Some(id) = parse_ptr(new_val) {
+        pool_retain(id);
+    }
+}
+
+/// 变量清除追踪
+#[allow(dead_code)]
+pub(crate) fn track_ptr_clear(val: &str) {
+    if let Some(id) = parse_ptr(val) {
+        pool_release(id);
+    }
+}
+
+fn pool_get_server(id: usize) -> Option<ServerData> {
+    match pool_get(id)? {
+        Instance::Server(s) => Some(s),
+        _ => None,
+    }
+}
+
+fn pool_set_server(id: usize, srv: ServerData) {
+    pool_set(id, Instance::Server(srv));
+}
+
+/// 原子读-改-写：对 pool 中的 Server 执行闭包
+fn pool_with_server<F, R>(id: usize, f: F) -> Option<R>
+where
+    F: FnOnce(&mut ServerData) -> R,
+{
+    let mut pool = INSTANCE_POOL.lock().ok()?;
+    match pool.get_mut(&id) {
+        Some(PoolEntry { inst: Instance::Server(ref mut srv), .. }) => Some(f(srv)),
+        _ => None,
+    }
+}
+
+fn pool_get_access(id: usize) -> Option<AccessRequest> {
+    match pool_get(id)? {
+        Instance::Access(req) => Some(req),
+        _ => None,
+    }
+}
+
+fn pool_set_access(id: usize, req: AccessRequest) {
+    pool_set(id, Instance::Access(req));
+}
+
+/// 检查池中是否存在指定 ID 的实例（不克隆）
+fn pool_has(id: usize) -> bool {
+    INSTANCE_POOL.lock().map(|p| p.contains_key(&id)).unwrap_or(false)
+}
+
+/// 原子读-改-写：对 pool 中的 AccessRequest 执行闭包
+fn pool_with_access<F, R>(id: usize, f: F) -> Option<R>
+where
+    F: FnOnce(&mut AccessRequest) -> R,
+{
+    let mut pool = INSTANCE_POOL.lock().ok()?;
+    match pool.get_mut(&id) {
+        Some(PoolEntry { inst: Instance::Access(ref mut req), .. }) => Some(f(req)),
+        _ => None,
+    }
+}
+
 // ==================== 访问请求结构体 ====================
 
 /// HTTP 请求对象
@@ -39,60 +183,16 @@ struct AccessResponse {
     data: Vec<u8>,
 }
 
-/// 全局请求存储（按 handle 索引）
-static REQUEST_STORE: LazyLock<Mutex<HashMap<String, AccessRequest>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-fn get_request(handle: &str) -> Option<AccessRequest> {
-    REQUEST_STORE.lock().ok()?.get(handle).cloned()
-}
-
-fn set_request(handle: &str, req: AccessRequest) {
-    if let Ok(mut store) = REQUEST_STORE.lock() {
-        store.insert(handle.to_string(), req);
-    }
-}
-
 // ==================== 服务器 OOP 实例 ====================
 
-/// 服务器实例字段键名
-const S_PORT: &str = "port";
-const S_HANDLER: &str = "handler";
-const S_STATIC_DIR: &str = "static_dir";
-const S_STATIC_URL: &str = "static_url";
-
-/// 判断一个 handle 是否为服务器实例
-pub(crate) fn is_server_instance(handle: &str) -> bool {
-    handle.starts_with("服务器@")
-}
-
-/// 从变量系统读取服务器实例字段
-fn read_server(ctx: &DicContext, handle: &str) -> Option<ServerData> {
-    let port = ctx.val.p.get_cloned(&format!("{}.{}", handle, S_PORT));
-    if port.is_empty() { return None; }
-    Some(ServerData {
-        port,
-        handler_ref: opt_field(ctx, handle, S_HANDLER),
-        static_dir: opt_field(ctx, handle, S_STATIC_DIR),
-        static_url_path: opt_field(ctx, handle, S_STATIC_URL),
-    })
-}
-
-/// 将服务器实例字段写入变量系统
-fn write_server(ctx: &mut DicContext, handle: &str, srv: &ServerData) {
-    ctx.val.p.set_string(&format!("{}.{}", handle, S_PORT), srv.port.clone());
-    set_opt_field(ctx, handle, S_HANDLER, &srv.handler_ref);
-    set_opt_field(ctx, handle, S_STATIC_DIR, &srv.static_dir);
-    set_opt_field(ctx, handle, S_STATIC_URL, &srv.static_url_path);
-}
-
-fn opt_field(ctx: &DicContext, handle: &str, field: &str) -> Option<String> {
-    let v = ctx.val.p.get_cloned(&format!("{}.{}", handle, field));
-    if v.is_empty() { None } else { Some(v) }
-}
-
-fn set_opt_field(ctx: &mut DicContext, handle: &str, field: &str, val: &Option<String>) {
-    ctx.val.p.set_string(&format!("{}.{}", handle, field), val.clone().unwrap_or_default());
+/// 判断一个值是否为服务器实例指针（*N 格式，且在池中存在）
+pub(crate) fn is_server_instance(val: &str) -> bool {
+    if let Some(n) = val.strip_prefix('*') {
+        if let Ok(id) = n.parse::<usize>() {
+            return matches!(pool_get(id), Some(Instance::Server(_)));
+        }
+    }
+    false
 }
 
 /// 服务器实例数据
@@ -218,14 +318,15 @@ fn map_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Strin
 
     let fn_ptr = ctx.shared.builtins.get(&fn_name).copied();
     let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut builtin_args = vec![fn_name, String::new()];
     for v in &arr {
-        let val_str = val_to_string(v);
         if let Some(builtin) = fn_ptr {
+            builtin_args[1] = val_to_string(v);
             let mut sub_ctx = ctx.clone_for_internal();
-            let result = builtin(&mut sub_ctx, &[fn_name.clone(), val_str.clone()], "");
-            if let Some(ref r) = result {
+            let result = builtin(&mut sub_ctx, &builtin_args, "");
+            if let Some(r) = result {
                 if !r.is_empty() {
-                    results.push(serde_json::Value::String(r.clone()));
+                    results.push(serde_json::Value::String(r));
                 }
             }
         }
@@ -241,12 +342,13 @@ fn filter_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
 
     let fn_ptr = ctx.shared.builtins.get(&fn_name).copied();
     let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut builtin_args = vec![fn_name, String::new()];
     for v in &arr {
-        let val_str = val_to_string(v);
         if let Some(builtin) = fn_ptr {
+            builtin_args[1] = val_to_string(v);
             let mut sub_ctx = ctx.clone_for_internal();
-            let result = builtin(&mut sub_ctx, &[fn_name.clone(), val_str.clone()], "");
-            if let Some(ref r) = result {
+            let result = builtin(&mut sub_ctx, &builtin_args, "");
+            if let Some(r) = result {
                 if !r.is_empty() && r != "0" && r != "false" {
                     results.push(v.clone());
                 }
@@ -631,53 +733,52 @@ fn print_return_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opt
     Some(print_core(ctx, args))
 }
 
-// ===== 创建服务器 — 创建服务器 OOP 实例，返回句柄 =====
+// ===== 创建服务器 — 创建服务器 OOP 实例，返回 *指针 =====
 
-fn create_server_fn(ctx: &mut DicContext, _args: &[String], _content: &str) -> Option<String> {
+fn create_server_fn(_ctx: &mut DicContext, _args: &[String], _content: &str) -> Option<String> {
     let instance_id = next_instance_id();
-    let handle = format!("服务器@{}", instance_id);
     let srv = ServerData {
         port: "8080".to_string(),
         handler_ref: None,
         static_dir: None,
         static_url_path: None,
     };
-    write_server(ctx, &handle, &srv);
-    Some(handle)
+    pool_set_server(instance_id, srv);
+    Some(format!("*{}", instance_id))
 }
 
 // ===== 服务器实例方法：.静态 和 .启动 =====
 
 /// 服务器.静态 — 配置静态文件目录，由 executor 通过 dispatch_server_method 调用
-pub(crate) fn server_static_method(ctx: &mut DicContext, handle: &str, args: &[String]) -> Option<String> {
-    let Some(mut srv) = read_server(ctx, handle) else {
-        return Some(format!("[错误] {} 服务器实例不存在", ctx.sys.file_location()));
-    };
+pub(crate) fn server_static_method(ctx: &mut DicContext, id: usize, args: &[String]) -> Option<String> {
     let dir = args.first().map(|s| s.as_str()).unwrap_or("静态");
-    srv.static_dir = Some(ctx.val.text(dir));
-    // 第二个参数：网络路径（URL 前缀），留空 = 根路径 "/"
+    let dir_val = ctx.val.text(dir);
     let url_path = args.get(1).map(|s| ctx.val.text(s)).unwrap_or_default();
-    srv.static_url_path = Some(url_path);
-    write_server(ctx, handle, &srv);
+    let result = pool_with_server(id, |srv| {
+        srv.static_dir = Some(dir_val);
+        srv.static_url_path = Some(url_path);
+    });
+    if result.is_none() {
+        return Some(format!("[错误] {} 服务器实例不存在", ctx.sys.file_location()));
+    }
     None
 }
 
 /// 服务器.启动 — 启动服务器监听，由 executor 通过 dispatch_server_method 调用
-pub(crate) fn server_start_method(ctx: &mut DicContext, handle: &str, args: &[String]) -> Option<String> {
-    let Some(srv) = read_server(ctx, handle) else {
+pub(crate) fn server_start_method(ctx: &mut DicContext, id: usize, args: &[String]) -> Option<String> {
+    let Some(srv) = pool_get_server(id) else {
         return Some(format!("[错误] {} 服务器实例不存在", ctx.sys.file_location()));
     };
 
-    let handler_ref: Option<String> = args.get(1).map(|s| s.to_string());
+    let handler_ref: Option<String> = args.get(1).map(|s| ctx.val.text(s));
 
-    // 未传入端口则使用实例默认端口
     let port = match args.first() {
         Some(s) => ctx.val.text(s.as_str()),
-        None => srv.port.clone(),
+        None => srv.port, // ServerData 已取出，直接 move
     };
-    let handler_ref = handler_ref.or(srv.handler_ref.clone());
-    let static_dir = srv.static_dir.clone();
-    let static_url_path = srv.static_url_path.clone();
+    let handler_ref = handler_ref.or(srv.handler_ref);
+    let static_dir = srv.static_dir;
+    let static_url_path = srv.static_url_path;
 
     run_server(ctx, &port, &handler_ref, &static_dir, &static_url_path)
 }
@@ -689,9 +790,10 @@ pub(crate) fn dispatch_server_method(
     method: &str,
     args: &[String],
 ) -> Option<String> {
+    let id: usize = handle.strip_prefix('*').and_then(|n| n.parse().ok()).unwrap_or(0);
     match method {
-        "静态" => server_static_method(ctx, handle, args),
-        "启动" => server_start_method(ctx, handle, args),
+        "静态" => server_static_method(ctx, id, args),
+        "启动" => server_start_method(ctx, id, args),
         _ => {
             ctx.sys.error = Some(format!(
                 "[错误] {} 服务器不支持方法 '{}'", ctx.sys.file_location(), method
@@ -732,7 +834,10 @@ fn run_server(
                 continue;
             }
         };
-        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut reader = match stream.try_clone() {
+            Ok(clone) => BufReader::new(clone),
+            Err(_) => continue,
+        };
         let mut writer = stream;
 
         let mut first_line = String::new();
@@ -1239,26 +1344,25 @@ fn is_json_str(s: &str) -> bool {
 }
 
 /// 确保 URL 有 http:// 前缀
-fn ensure_http(url: &str) -> String {
-    if url.starts_with("http://") || url.starts_with("https://") {
-        url.to_string()
-    } else {
-        format!("http://{}", url)
+fn ensure_http(mut url: String) -> String {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        url.insert_str(0, "http://");
     }
+    url
 }
 
-// ===== 创建访问 url$ — 创建请求对象，返回 OOP 对象引用 =====
+// ===== 创建访问 url$ — 创建请求对象，返回 *指针 =====
 
 fn create_access_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let url = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     if url.is_empty() {
         return Some(format!("[错误] {} 创建访问 需要 URL", ctx.sys.file_location()));
     }
+    let url = ensure_http(url);
     let instance_id = next_instance_id();
-    let handle = format!("访问请求@{}", instance_id);
     let req = AccessRequest {
         method: "get".to_string(),
-        url: ensure_http(&url),
+        url,
         headers: HashMap::new(),
         timeout: 0,
         files: HashMap::new(),
@@ -1266,64 +1370,54 @@ fn create_access_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
         response: None,
         stop_redirect: false,
     };
-    set_request(&handle, req);
-    // 返回 OOP 对象引用（\x00 标记，与 $new$ 保持一致）
-    let mut result = String::new();
-    result.push('\x00');
-    result.push_str(&handle);
-    result.push('\x00');
-    Some(result)
+    pool_set_access(instance_id, req);
+    Some(format!("*{}", instance_id))
 }
 
 // ===== 访问.切换GET handle$ — 切换为 GET =====
 
 fn change_get_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let (handle, _) = get_req_handle_and_offset(ctx, args);
-    let Some(mut req) = get_request(&handle) else {
+    let (id, _) = get_req_id_and_offset(ctx, args);
+    if pool_with_access(id, |req| req.method = "get".to_string()).is_none() {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
-    };
-    req.method = "get".to_string();
-    set_request(&handle, req);
+    }
     None
 }
 
 // ===== 访问.切换POST handle [body]$ — 切换为 POST 并可选设置 body =====
 
 fn change_post_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let (handle, offset) = get_req_handle_and_offset(ctx, args);
-    let Some(mut req) = get_request(&handle) else {
+    let (id, offset) = get_req_id_and_offset(ctx, args);
+    let body = args.get(offset).map(|s| ctx.val.text(s));
+    if pool_with_access(id, |req| {
+        req.method = "post".to_string();
+        if let Some(b) = body {
+            req.body = b;
+        }
+    }).is_none() {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
-    };
-    req.method = "post".to_string();
-    if let Some(body) = args.get(offset) {
-        req.body = ctx.val.text(body);
     }
-    set_request(&handle, req);
     None
 }
 
 // ===== 访问.POST handle body$ — 设置 POST body =====
 
 fn request_post_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let (handle, offset) = get_req_handle_and_offset(ctx, args);
-    let Some(mut req) = get_request(&handle) else {
+    let (id, offset) = get_req_id_and_offset(ctx, args);
+    let body_val = ctx.val.text(args.get(offset).map(|s| s.as_str()).unwrap_or(""));
+    if pool_with_access(id, |req| {
+        req.method = "post".to_string();
+        req.body = body_val;
+    }).is_none() {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
-    };
-    req.method = "post".to_string();
-    req.body = ctx.val.text(args.get(offset).map(|s| s.as_str()).unwrap_or(""));
-    set_request(&handle, req);
+    }
     None
 }
 
 // ===== 访问.POST文件 handle field data [filename]$ — 设置 multipart 文件 =====
 
 fn request_post_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let (handle, offset) = get_req_handle_and_offset(ctx, args);
-    let Some(mut req) = get_request(&handle) else {
-        return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
-    };
-    req.method = "post".to_string();
-
+    let (id, offset) = get_req_id_and_offset(ctx, args);
     let field = ctx.val.text(args.get(offset).map(|s| s.as_str()).unwrap_or(""));
     let data = ctx.val.text(args.get(offset + 1).map(|s| s.as_str()).unwrap_or("")).into_bytes();
 
@@ -1343,70 +1437,71 @@ fn request_post_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -
         (fname, fdata)
     };
 
-    let entry = req.files.entry(field.clone()).or_default();
-    entry.insert(String::from_utf8_lossy(&filename).to_string(), file_data);
-    set_request(&handle, req);
+    let filename_str = String::from_utf8_lossy(&filename).to_string();
+    if pool_with_access(id, |req| {
+        req.method = "post".to_string();
+        req.files.entry(field.clone()).or_default()
+            .insert(filename_str, file_data);
+    }).is_none() {
+        return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
+    }
     None
 }
 
 // ===== 访问.启用跳转 handle$ — 允许重定向 =====
 
 fn enable_redirects_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let (handle, _) = get_req_handle_and_offset(ctx, args);
-    let Some(mut req) = get_request(&handle) else {
+    let (id, _) = get_req_id_and_offset(ctx, args);
+    if pool_with_access(id, |req| req.stop_redirect = false).is_none() {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
-    };
-    req.stop_redirect = false;
-    set_request(&handle, req);
+    }
     None
 }
 
 // ===== 访问.禁用跳转 handle$ — 禁止重定向 =====
 
 fn disable_redirects_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let (handle, _) = get_req_handle_and_offset(ctx, args);
-    let Some(mut req) = get_request(&handle) else {
+    let (id, _) = get_req_id_and_offset(ctx, args);
+    if pool_with_access(id, |req| req.stop_redirect = true).is_none() {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
-    };
-    req.stop_redirect = true;
-    set_request(&handle, req);
+    }
     None
 }
 
 // ===== 访问.设置头部 handle json_headers$ — 设置请求头 =====
 
 fn set_headers_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let (handle, offset) = get_req_handle_and_offset(ctx, args);
-    let Some(mut req) = get_request(&handle) else {
-        return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
-    };
+    let (id, offset) = get_req_id_and_offset(ctx, args);
     let headers_str = ctx.val.text(args.get(offset).map(|s| s.as_str()).unwrap_or(""));
-    if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&headers_str) {
-        req.headers = map;
+    let headers: Option<HashMap<String, String>> = serde_json::from_str(&headers_str).ok();
+    if pool_with_access(id, |req| {
+        if let Some(map) = headers {
+            req.headers = map;
+        }
+    }).is_none() {
+        return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
     }
-    set_request(&handle, req);
     None
 }
 
 // ===== 访问.设置超时 handle seconds$ — 设置超时秒数 =====
 
 fn set_timeout_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let (handle, offset) = get_req_handle_and_offset(ctx, args);
-    let Some(mut req) = get_request(&handle) else {
-        return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
-    };
-    req.timeout = args.get(offset)
+    let (id, offset) = get_req_id_and_offset(ctx, args);
+    let timeout = args.get(offset)
         .and_then(|s| ctx.val.text(s).trim().parse::<usize>().ok())
         .unwrap_or(15);
-    set_request(&handle, req);
+    if pool_with_access(id, |req| req.timeout = timeout).is_none() {
+        return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
+    }
     None
 }
 
 // ===== 访问.发送 handle$ — 发送请求，结果存入 response =====
 
 fn request_send_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let (handle, _) = get_req_handle_and_offset(ctx, args);
-    let Some(req) = get_request(&handle) else {
+    let (id, _) = get_req_id_and_offset(ctx, args);
+    let Some(req) = pool_get_access(id) else {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
     };
 
@@ -1474,7 +1569,7 @@ fn request_send_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opt
         Ok(resp) => {
             let mut updated = req;
             updated.response = Some(resp);
-            set_request(&handle, updated);
+            pool_set_access(id, updated);
             None
         }
         Err(e) => Some(format!("[错误] {} {}", ctx.sys.file_location(), e)),
@@ -1517,8 +1612,8 @@ fn build_multipart_body(req: &AccessRequest, boundary: &str) -> Vec<u8> {
 // ===== 访问.全部内容 handle$ — 返回完整响应 JSON（含状态、头部、data 已屏蔽）=====
 
 fn request_all_content_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let (handle, _) = get_req_handle_and_offset(ctx, args);
-    let Some(req) = get_request(&handle) else {
+    let (id, _) = get_req_id_and_offset(ctx, args);
+    let Some(req) = pool_get_access(id) else {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
     };
     let resp = match &req.response {
@@ -1544,8 +1639,8 @@ fn request_all_content_fn(ctx: &mut DicContext, args: &[String], _content: &str)
 // ===== 访问.内容 handle$ — 返回响应 body 文本 =====
 
 fn request_content_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let (handle, _) = get_req_handle_and_offset(ctx, args);
-    let Some(req) = get_request(&handle) else {
+    let (id, _) = get_req_id_and_offset(ctx, args);
+    let Some(req) = pool_get_access(id) else {
         return Some(format!("[错误] {} 未新建请求", ctx.sys.file_location()));
     };
     let resp = match &req.response {
@@ -1558,7 +1653,7 @@ fn request_content_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> 
 // ===== 访问 url [headers_json]$ — 快捷 GET 请求 =====
 
 fn access_get_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let url = ensure_http(&ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or("")));
+    let url = ensure_http(ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or("")));
     if url.is_empty() || url == "http://" {
         return Some(format!("[错误] {} 访问 需要 URL", ctx.sys.file_location()));
     }
@@ -1597,7 +1692,7 @@ fn access_get_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Optio
 // ===== 访问POST url body [headers_json]$ — 快捷 POST 请求 =====
 
 fn access_post_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let url = ensure_http(&ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or("")));
+    let url = ensure_http(ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or("")));
     let body = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
     if url.is_empty() || url == "http://" {
         return Some(format!("[错误] {} 访问POST 需要 URL", ctx.sys.file_location()));
@@ -1642,7 +1737,7 @@ fn access_post_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
 // ===== 访问转发 url$ — 将当前 HTTP 请求转发到目标 URL =====
 
 fn request_forward_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let target_url = ensure_http(&ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or("")));
+    let target_url = ensure_http(ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or("")));
     if target_url.is_empty() || target_url == "http://" {
         return Some(format!("[错误] {} 访问转发 需要 URL", ctx.sys.file_location()));
     }
@@ -1726,19 +1821,28 @@ fn request_forward_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> 
     }
 }
 
-/// 获取请求句柄和参数起始偏移（OOP 兼容）
-/// 返回 (handle, data_start_index)
-/// - 显式句柄模式：args[1] 是句柄 → data_start=2
-/// - OOP 模式：句柄来自 self 变量 → data_start=1
-fn get_req_handle_and_offset(ctx: &mut DicContext, args: &[String]) -> (String, usize) {
+/// 获取请求实例 ID 和参数起始偏移（OOP 兼容）
+/// 返回 (instance_id, data_start_index)
+/// - 显式句柄模式：args[1] 是 *N 指针 → data_start=2
+/// - OOP 模式：ID 来自 self 变量 → data_start=1
+fn get_req_id_and_offset(ctx: &mut DicContext, args: &[String]) -> (usize, usize) {
     if let Some(h) = args.get(1) {
         let h = ctx.val.text(h);
-        if !h.is_empty() && (h.starts_with("req_") || h.contains("访问请求@")) {
-            return (h, 2);
+        if let Some(n) = h.strip_prefix('*') {
+            if let Ok(id) = n.parse::<usize>() {
+                if pool_has(id) {
+                    return (id, 2);
+                }
+            }
         }
     }
     let handle = ctx.val.p.get_cloned("self");
-    (handle, 1)
+    if let Some(n) = handle.strip_prefix('*') {
+        if let Ok(id) = n.parse::<usize>() {
+            return (id, 1);
+        }
+    }
+    (0, 1)
 }
 
 // ===== 类型转换 =====
@@ -2906,7 +3010,7 @@ fn file_list_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option
 fn random_dir_name_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let path_buf = std::path::PathBuf::from(&path);
-    let dirs: Vec<String> = match file_lock::with_file_read(&path_buf, || std::fs::read_dir(&path)) {
+    let mut dirs: Vec<String> = match file_lock::with_file_read(&path_buf, || std::fs::read_dir(&path)) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
@@ -2916,14 +3020,14 @@ fn random_dir_name_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> 
     };
     if dirs.is_empty() { return Some(String::new()); }
     let idx = simple_rand(dirs.len());
-    Some(dirs[idx].clone())
+    Some(dirs.swap_remove(idx))
 }
 
 /// $随机文件名 [路径]$ — 随机返回目录下的一个文件名
 fn random_file_name_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let path_buf = std::path::PathBuf::from(&path);
-    let files: Vec<String> = match file_lock::with_file_read(&path_buf, || std::fs::read_dir(&path)) {
+    let mut files: Vec<String> = match file_lock::with_file_read(&path_buf, || std::fs::read_dir(&path)) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
@@ -2933,7 +3037,7 @@ fn random_file_name_fn(ctx: &mut DicContext, args: &[String], _content: &str) ->
     };
     if files.is_empty() { return Some(String::new()); }
     let idx = simple_rand(files.len());
-    Some(files[idx].clone())
+    Some(files.swap_remove(idx))
 }
 
 /// $文件夹大小 路径$ — 递归计算目录总大小（字节）
