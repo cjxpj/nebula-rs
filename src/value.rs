@@ -400,11 +400,19 @@ impl Val {
             return Self::lookup_display_raw(key, local, global);
         }
         // 指针解引用：%a% 时若 *a 存在，则取 *a 的值作为目标变量名，再查找目标变量
+        // 重要：先检查直接变量是否存在，只有直接变量未命中时才走指针链，避免字符串误判为指针
         if !key.starts_with('*') {
+            let direct = Self::lookup_display_raw(key, local, global);
+            // 直接变量命中（不以 %key% 形式返回）→ 直接返回
+            if !(direct.starts_with('%') && direct.ends_with('%')) {
+                return direct;
+            }
+            // 直接变量不存在 → 尝试指针链解引用
             let ptr_key = format!("*{}", key);
             if let Some(target) = Self::resolve_ptr_chain(&ptr_key, local, global, depth) {
                 return target;
             }
+            return direct;
         }
         Self::lookup_display_raw(key, local, global)
     }
@@ -412,12 +420,20 @@ impl Val {
     pub fn lookup_display(key: &str, local: &HashMap<String, Value>, global: Option<&HashMap<String, Value>>) -> String {
         // 指针解引用：%a% 时若 *a 存在，则取 *a 的值作为目标变量名，再查找目标变量
         // %*a% 直接返回 *a 的值（目标变量名），不再二次解引用
+        // 重要：先检查直接变量是否存在，只有直接变量未命中时才走指针链，避免字符串误判为指针
         if !key.starts_with('*') {
+            let direct = Self::lookup_display_raw(key, local, global);
+            // 直接变量命中（不以 %key% 形式返回）→ 直接返回
+            if !(direct.starts_with('%') && direct.ends_with('%')) {
+                return direct;
+            }
+            // 直接变量不存在 → 尝试指针链解引用
             let ptr_key = format!("*{}", key);
             // 最多递归 8 层防止循环引用
             if let Some(target) = Self::resolve_ptr_chain(&ptr_key, local, global, 8) {
                 return target;
             }
+            return direct;
         }
         Self::lookup_display_raw(key, local, global)
     }

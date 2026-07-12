@@ -8,7 +8,6 @@ use std::io::Read;
 use std::collections::HashMap;
 use std::sync::{Mutex, LazyLock};
 use std::io::Write;
-use rand::Rng;
 
 // 非池用途的简单自增计数器（如 multipart boundary）
 static SEQ_ID: AtomicUsize = AtomicUsize::new(0);
@@ -17,7 +16,7 @@ pub(crate) fn next_seq_id() -> usize {
     SEQ_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-// ==================== 统一实例线程池（随机指针地址，类似 Go 的 allocator 行为） ====================
+// ==================== 统一实例线程池（真实堆指针地址，完全对标 Go） ====================
 
 /// 所有 OOP 实例的枚举
 #[derive(Clone)]
@@ -44,19 +43,12 @@ struct PoolEntry {
 static INSTANCE_POOL: LazyLock<Mutex<HashMap<usize, Box<PoolEntry>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// 分配实例并返回随机指针地址（Go 风格，不可预测，防枚举攻击）
+/// 分配实例并返回真实堆指针地址（对标 Go &T{}，非确定性地址，防枚举攻击）
 fn pool_alloc(inst: Instance) -> usize {
-    let mut rng = rand::thread_rng();
-    let mut pool = INSTANCE_POOL.lock().expect("实例池锁已中毒");
-    loop {
-        let id: usize = rng.gen();
-        if id == 0 { continue; } // 0 无效
-        if let std::collections::hash_map::Entry::Vacant(e) = pool.entry(id) {
-            let entry = Box::new(PoolEntry { inst, refs: 1 });
-            e.insert(entry);
-            return id;
-        }
-    }
+    let entry = Box::new(PoolEntry { inst, refs: 1 });
+    let addr = &*entry as *const PoolEntry as usize;
+    INSTANCE_POOL.lock().expect("实例池锁已中毒").insert(addr, entry);
+    addr
 }
 
 fn pool_get(id: usize) -> Option<Instance> {
@@ -86,9 +78,10 @@ pub(crate) fn pool_release(id: usize) {
     }
 }
 
-/// 解析 *N 指针，返回实例 ID
+/// 解析 *0xN 指针（Go 风格十六进制地址），返回实例 ID
 fn parse_ptr(val: &str) -> Option<usize> {
-    val.strip_prefix('*').and_then(|n| n.parse::<usize>().ok())
+    let hex = val.strip_prefix("*0x")?;
+    usize::from_str_radix(hex, 16).ok()
 }
 
 /// 变量赋值追踪：释放旧指针，持有新指针
@@ -189,8 +182,7 @@ where
 
 /// 解析 *N 指针 → 从池中获取 class_spec 和 instance_key
 pub(crate) fn resolve_class_from_pool(raw: &str) -> Option<(String, String)> {
-    raw.strip_prefix('*')
-        .and_then(|n| n.parse::<usize>().ok())
+    parse_ptr(raw)
         .and_then(|id| pool_get_class(id))
         .map(|ci| (ci.class_spec, ci.instance_key))
 }
@@ -793,7 +785,7 @@ fn create_server_fn(_ctx: &mut DicContext, _args: &[String], _content: &str) -> 
         static_url_path: None,
     };
     let instance_id = pool_alloc_server(srv);
-    Some(format!("*{}", instance_id))
+    Some(format!("*{:#x}", instance_id))
 }
 
 // ===== 服务器实例方法：.静态 和 .启动 =====
@@ -839,7 +831,7 @@ pub(crate) fn dispatch_server_method(
     method: &str,
     args: &[String],
 ) -> Option<String> {
-    let id: usize = handle.strip_prefix('*').and_then(|n| n.parse().ok()).unwrap_or(0);
+    let id: usize = parse_ptr(handle).unwrap_or(0);
     match method {
         "静态" => server_static_method(ctx, id, args),
         "启动" => server_start_method(ctx, id, args),
@@ -1419,7 +1411,7 @@ fn create_access_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
         stop_redirect: false,
     };
     let instance_id = pool_alloc_access(req);
-    Some(format!("*{}", instance_id))
+    Some(format!("*{:#x}", instance_id))
 }
 
 // ===== 访问.切换GET handle$ — 切换为 GET =====
