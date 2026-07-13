@@ -8,7 +8,7 @@ hero:
   actions:
     - theme: brand
       text: 开始阅读
-      link: /v1.0/
+      link: /v0.1.0/
 
 features:
   - title: 简洁语法
@@ -21,7 +21,7 @@ features:
 
 ## 工具
 
-- <a href="./vscode-nr/nr-language-0.1.0.vsix">下载 VS Code 语法高亮扩展 (.vsix)</a>
+- <a href="./public/vscode-nr/nr-language-0.1.0.vsix">下载 VS Code 语法高亮扩展 (.vsix)</a>
   - 安装：VS Code → `Ctrl+Shift+P` → "Install from VSIX..." → 选择下载的文件
 
 ## 项目信息

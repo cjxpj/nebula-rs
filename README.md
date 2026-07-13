@@ -3,7 +3,7 @@
   <p align="center">
     <img src="https://img.shields.io/badge/Rust-2021%20edition-orange?logo=rust" alt="Rust">
     <img src="https://img.shields.io/badge/license-CC%20BY--NC%204.0-blue" alt="License">
-    <img src="https://img.shields.io/badge/version-0.1.0-green" alt="Version">
+    <img src="https://img.shields.io/badge/version-0.1.1-green" alt="Version">
   </p>
   <p align="center">基于 Rust 的词库引擎 / NR 语言解释器</p>
 </p>
@@ -45,17 +45,17 @@ src/
 
 | 章节 | 内容 |
 |---|---|
-| [词法结构](https://cjxpj.github.io/nebula-rs/#/v1.0/lexical) | 源文件结构、注释、转义、多行字符串 |
-| [类型系统](https://cjxpj.github.io/nebula-rs/#/v1.0/types) | 整数/浮点/字符串/布尔/对象/函数 |
-| [变量与赋值](https://cjxpj.github.io/nebula-rs/#/v1.0/variables) | 作用域、操作符、内置变量 |
-| [表达式](https://cjxpj.github.io/nebula-rs/#/v1.0/expressions) | 数学运算、比较、逻辑运算 |
-| [控制流](https://cjxpj.github.io/nebula-rs/#/v1.0/control-flow) | 条件分支、循环、中断与跳转 |
-| [词条系统](https://cjxpj.github.io/nebula-rs/#/v1.0/entries) | 普通词条、内部词条、类词条 |
-| [函数](https://cjxpj.github.io/nebula-rs/#/v1.0/functions) | 定义语法、参数、初始化、main 入口 |
-| [JSON 数据处理](https://cjxpj.github.io/nebula-rs/#/v1.0/json) | 内联 JSON、导航读写 |
-| [面向对象](https://cjxpj.github.io/nebula-rs/#/v1.0/oop) | 类定义、实例化、方法调用 |
-| [模块与引入](https://cjxpj.github.io/nebula-rs/#/v1.0/modules) | 文件/目录引入、热更新 |
-| [内置函数](https://cjxpj.github.io/nebula-rs/#/v1.0/flow-output) | 流程控制、输出、标准库 |
+| [词法结构](https://cjxpj.github.io/nebula-rs/#/v0.1.0/lexical) | 源文件结构、注释、转义、多行字符串 |
+| [类型系统](https://cjxpj.github.io/nebula-rs/#/v0.1.0/types) | 整数/浮点/字符串/布尔/对象/函数 |
+| [变量与赋值](https://cjxpj.github.io/nebula-rs/#/v0.1.0/variables) | 作用域、操作符、内置变量 |
+| [表达式](https://cjxpj.github.io/nebula-rs/#/v0.1.0/expressions) | 数学运算、比较、逻辑运算 |
+| [控制流](https://cjxpj.github.io/nebula-rs/#/v0.1.0/control-flow) | 条件分支、循环、中断与跳转 |
+| [词条系统](https://cjxpj.github.io/nebula-rs/#/v0.1.0/entries) | 普通词条、内部词条、类词条 |
+| [函数](https://cjxpj.github.io/nebula-rs/#/v0.1.0/functions) | 定义语法、参数、初始化、main 入口 |
+| [JSON 数据处理](https://cjxpj.github.io/nebula-rs/#/v0.1.0/json) | 内联 JSON、导航读写 |
+| [面向对象](https://cjxpj.github.io/nebula-rs/#/v0.1.0/oop) | 类定义、实例化、方法调用 |
+| [模块与引入](https://cjxpj.github.io/nebula-rs/#/v0.1.0/modules) | 文件/目录引入、热更新、星号引入 |
+| [内置函数](https://cjxpj.github.io/nebula-rs/#/v0.1.0/flow-output) | 流程控制、输出、标准库 |
 
 ## 许可证
 
