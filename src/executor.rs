@@ -1,7 +1,6 @@
-//! Nebula DSL 的 AST 解析器与树遍历执行器。
-//! 替代 interpreter.rs::entry() 中约 1200 行的状态机。
+//! Nebula 脚本的 AST 解析器与树遍历执行器。
 //!
-//! 现代 DSL 语法（替代旧的 entry() 状态机）：
+//! 脚本语法：
 //!   Output:     任何无赋值操作符的行
 //!   Assign:     key:value, key+:value, key-:value, key*:value, key/:value, key%:value
 //!   Loop:       循环>var=N ... <循环   或   循环>var ... <循环 (无限)
@@ -44,7 +43,7 @@ pub enum ExecResult {
 
 /* ===================== 解析器 ===================== */
 
-/// 将 DSL 代码块解析为 AST 语句列表
+/// 将脚本代码块解析为 AST 语句列表
 pub fn parse_stmts(lines: &[String], _is_sub_package: bool, line_offset: usize, source_file: &str) -> Result<Vec<Stmt>, String> {
     let processed = preprocess(lines);
     let mut stmts = Vec::new();
@@ -565,7 +564,7 @@ fn build_json_value(parts: &[&str], marker: &str, start_line: usize, line_offset
         return Ok(raw);
     }
 
-    // 不是合法 JSON → 按 DSL 格式重新构建
+    // 不是合法 JSON → 按脚本格式重新构建
     let qstr = |v: &str| -> String {
         let v = v.trim();
         if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
