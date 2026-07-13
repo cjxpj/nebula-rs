@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::SystemTime;
 use crate::value::DicVal;
 use crate::parser::{BuildDic, BuildValue};
 use crate::analyzer::val_text_test;
@@ -203,8 +202,6 @@ pub struct SharedContext {
     pub star_import_funcs: HashMap<String, String>,
     pub triggers: Vec<BuildDic>,
     pub init_lines: Vec<String>,
-    /// 包最后加载时间，用于热更新检测
-    pub package_mtimes: HashMap<String, SystemTime>,
 }
 
 #[derive(Debug, Clone)]
@@ -241,7 +238,6 @@ impl DicContext {
             star_import_funcs: HashMap::new(),
             triggers: Vec::new(),
             init_lines: Vec::new(),
-            package_mtimes: HashMap::new(),
         };
         let mut ctx = DicContext {
             val: DicVal::new(),
@@ -257,9 +253,9 @@ impl DicContext {
     pub fn load_from_build(&mut self, bv: &BuildValue) {
         // 所有 head 行统一收集到 init_lines，由 exec_init 按顺序执行
         // 只有 #引入= 包引入需要在此立即处理以获取包变量
-        // 头部变量仅设为局部，全局变量由 [f]初始化 负责
+        // 头部变量仅设为局部
         let mut loaded_pkgs: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut star_init_pkgs: Vec<(String, BuildValue, bool)> = Vec::new(); // (pkg_name, pkg_bv, is_star)
+        let mut processed_heads: std::collections::HashSet<String> = std::collections::HashSet::new();
         let shared = Arc::make_mut(&mut self.shared);
         for (head_idx, line) in bv.head.iter().enumerate() {
             // #引入 / #引入= / #引入*= / pkg:#引入= 行在解析阶段已处理，不加入初始化队列
@@ -282,6 +278,7 @@ impl DicContext {
                     !(t == 6 && p == v_prefix)
                 });
                 if let Some(pkg_bv) = bv.packages.get(pkg_lookup) {
+                    if !processed_heads.insert(pkg_lookup.to_string()) { continue; }
                     // 冲突检测：类名不能和同包函数名相同
                     let mut class_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
                     for item in pkg_bv.local_func.iter().chain(pkg_bv.local_static.iter()) {
@@ -326,11 +323,10 @@ impl DicContext {
                                 pv_processed.clone()
                             };
                             self.val.p.set_string(&pv_prefix, pv_final.clone());
+                        } else if !pkg_line.trim().is_empty() {
+                            // 非变量头部行加入初始化队列，确保引入包的可执行头部行得到执行
+                            shared.init_lines.push(pkg_line.clone());
                         }
-                    }
-                    // 收集有 [f]初始化 的包（改到头部执行）
-                    if pkg_bv.local_func.iter().any(|f| f.trigger == "初始化") {
-                        star_init_pkgs.push((pkg_lookup.to_string(), pkg_bv.clone(), false));
                     }
                 }
             }
@@ -355,6 +351,7 @@ impl DicContext {
                         }
                     };
                     if let Some(pkg_bv) = bv.packages.get(&pkg_key) {
+                        if !processed_heads.insert(pkg_key.clone()) { continue; }
                         // 冲突检测：类名不能和同包函数名相同
                         let mut cn_set: std::collections::HashSet<&str> = std::collections::HashSet::new();
                         for item in pkg_bv.local_func.iter().chain(pkg_bv.local_static.iter()) {
@@ -385,6 +382,8 @@ impl DicContext {
                             }
                         }
                         if self.sys.stop { continue; }
+                        // 清理该包的旧星引入函数映射，再重新注册
+                        shared.star_import_funcs.retain(|_, v| v != &pkg_key);
                         // 注册星引入函数→源包名映射（用于隔离执行）
                         for func in &pkg_bv.local_func {
                             shared.star_import_funcs.insert(func.trigger.clone(), pkg_key.clone());
@@ -416,13 +415,44 @@ impl DicContext {
                                     pv_processed.clone()
                                 };
                                 self.val.p.set_string(&pv_prefix, pv_final.clone());
+                            } else if !pkg_line.trim().is_empty() {
+                                // 非变量头部行加入初始化队列，确保引入包的可执行头部行得到执行
+                                shared.init_lines.push(pkg_line.clone());
                             }
                         }
-                        // 记录需要执行 [f]初始化 的包（在 shared 借出后执行）
-                        if !pkg_bv.local_func.iter().any(|f| f.trigger == "初始化") {
-                            // 无初始化，跳过
-                        } else {
-                            star_init_pkgs.push((pkg_key.clone(), pkg_bv.clone(), true));
+                    }
+                }
+            }
+            // 引入 #引入=path：加载被引入包的 head 变量和可执行行
+            if line.starts_with("#引入=") && !line.starts_with("#引入*=") {
+                let raw_path = line.strip_prefix("#引入=").unwrap_or("").trim();
+                let pkg_key = if crate::functions::is_stdlib_path(raw_path) {
+                    raw_path[1..].to_string()
+                } else {
+                    let p = std::path::Path::new(raw_path);
+                    if raw_path.ends_with(".nr") {
+                        p.file_stem().and_then(|s| s.to_str()).unwrap_or(raw_path).to_string()
+                    } else {
+                        p.file_name().and_then(|s| s.to_str()).unwrap_or(raw_path).to_string()
+                    }
+                };
+                if let Some(pkg_bv) = bv.packages.get(&pkg_key) {
+                    if !processed_heads.insert(pkg_key.clone()) { continue; }
+                    for pkg_line in &pkg_bv.head {
+                        let (pv_type, pv_prefix, pv_suffix) = val_text_test(pkg_line);
+                        if pv_type == 6 && !pv_prefix.is_empty() {
+                            if self.val.p.get(&pv_prefix).is_some() {
+                                continue;
+                            }
+                            let pv_processed = self.val.text(&pv_suffix);
+                            let pv_final = if pv_suffix.starts_with('[') && pv_suffix.ends_with(']') {
+                                crate::count::run_count_text(&self.val, &pv_processed)
+                            } else {
+                                pv_processed.clone()
+                            };
+                            self.val.p.set_string(&pv_prefix, pv_final.clone());
+                        } else if !pkg_line.trim().is_empty() {
+                            shared.init_lines.push(pkg_line.clone());
                         }
                     }
                 }
@@ -448,139 +478,6 @@ impl DicContext {
                 crate::functions::StdLib::register_module(self, module);
             }
         }
-
-        // 执行所有引入包的 [f]初始化 并将其变量归属为 head 变量
-        for (pkg_key, pkg_bv, is_star) in &star_init_pkgs {
-            for func in &pkg_bv.local_func {
-                if func.trigger == "初始化" {
-                    let mut sub_ctx = self.fresh_sub_context();
-                    let sub_shared = Arc::make_mut(&mut sub_ctx.shared);
-                    sub_shared.local_static = pkg_bv.local_static.clone();
-                    sub_shared.local_func = pkg_bv.local_func.clone();
-                    sub_shared.triggers = pkg_bv.dic.clone();
-                    let _ = sub_shared;
-                    sub_ctx.rebuild_internal_maps();
-                    for line in &pkg_bv.head {
-                        let (v_type, v_prefix, v_suffix) = val_text_test(line);
-                        if v_type == 6 && !v_prefix.is_empty() {
-                            let value = sub_ctx.val.text(&v_suffix);
-                            sub_ctx.val.p.set_string(&v_prefix, value.clone());
-                        }
-                    }
-                    sub_ctx.val.p.set_string("self", pkg_key.clone());
-                    sub_ctx.val.p.set_string("触发", format!("{}.初始化", pkg_key));
-                    entry(&mut sub_ctx, &func.text);
-                    // 星引入：裸变量注入（不覆盖已有）；普通引入：pkg.var 格式
-                    for (k, v) in sub_ctx.val.p.get_all() {
-                        if k == "self" || k == "触发" {
-                            continue;
-                        }
-                        if *is_star {
-                            if self.val.p.get(&k).is_some() { continue; }
-                            self.val.p.set_val(&k, v.clone());
-                        } else {
-                            let pkg_keyed = format!("{}.{}", pkg_key, k);
-                            self.val.p.set_val(&pkg_keyed, v.clone());
-                        }
-                    }
-                    break; // 每个包只执行一次 [f]初始化
-                }
-            }
-        }
-
-        // 执行包/子包的 [f]初始化（跳过已在头部执行的包）
-        let star_init_names: HashSet<String> = star_init_pkgs.iter().map(|(n, _, _)| n.clone()).collect();
-        let init_output = self.run_pkg_init(bv, &star_init_names);
-        if !init_output.is_empty() {
-            self.output.add(&init_output);
-        }
-    }
-
-    /// 执行包的 [f]初始化（支持文件夹子包）
-    fn run_pkg_init(&mut self, bv: &BuildValue, skip_pkgs: &HashSet<String>) -> String {
-        let mut out = String::new();
-        for (pkg_name, pkg_bv) in &bv.packages {
-            // 跳过已在星引入头部执行的包
-            if skip_pkgs.contains(pkg_name) {
-                continue;
-            }
-            if !pkg_bv.sub_packages.is_empty() {
-                // 文件夹包：遍历子包执行各自的 [f]初始化
-                for sub_bv in pkg_bv.sub_packages.values() {
-                    for func in &sub_bv.local_func {
-                        if func.trigger == "初始化" {
-                            let mut sub_ctx = self.fresh_sub_context();
-                            let sub_shared = Arc::make_mut(&mut sub_ctx.shared);
-                            sub_shared.local_static = sub_bv.local_static.clone();
-                            sub_shared.local_func = sub_bv.local_func.clone();
-                            sub_shared.triggers = sub_bv.dic.clone();
-                            let _ = sub_shared;
-                            sub_ctx.rebuild_internal_maps();
-                            // 加载子包 head 变量
-                            for line in &sub_bv.head {
-                                let (v_type, v_prefix, v_suffix) = val_text_test(line);
-                                if v_type == 6 && !v_prefix.is_empty() {
-                                    let value = sub_ctx.val.text(&v_suffix);
-                                    sub_ctx.val.p.set_string(&v_prefix, value.clone());
-                                    sub_ctx.val.set_g_string(&v_prefix, value);
-                                }
-                            }
-                            sub_ctx.val.p.set_string("self", pkg_name.clone());
-                            sub_ctx.val.p.set_string("触发", format!("{}.初始化", pkg_name));
-                            entry(&mut sub_ctx, &func.text);
-                            if sub_ctx.sys.stop { self.sys.stop = true; }
-                            let init_out = sub_ctx.output.get();
-                            if !init_out.is_empty() {
-                                if !out.is_empty() { out.push('\n'); }
-                                out.push_str(&init_out);
-                            }
-                            // 回写变量到主上下文（包名.变量名 格式）
-                            for (k, v) in sub_ctx.val.p.get_all() {
-                                let pkg_key = format!("{}.{}", pkg_name, k);
-                                self.val.p.set_val(&pkg_key, v.clone());
-                                self.val.set_g_val(&pkg_key, v.clone());
-                            }
-                        }
-                    }
-                }
-            } else {
-                // 单文件包
-                for func in &pkg_bv.local_func {
-                    if func.trigger == "初始化" {
-                        let mut sub_ctx = self.fresh_sub_context();
-                        let sub_shared = Arc::make_mut(&mut sub_ctx.shared);
-                        sub_shared.local_static = pkg_bv.local_static.clone();
-                        sub_shared.local_func = pkg_bv.local_func.clone();
-                        sub_shared.triggers = pkg_bv.dic.clone();
-                        let _ = sub_shared;
-                        sub_ctx.rebuild_internal_maps();
-                        for line in &pkg_bv.head {
-                            let (v_type, v_prefix, v_suffix) = val_text_test(line);
-                            if v_type == 6 && !v_prefix.is_empty() {
-                                let value = sub_ctx.val.text(&v_suffix);
-                                sub_ctx.val.p.set_string(&v_prefix, value.clone());
-                                sub_ctx.val.set_g_string(&v_prefix, value);
-                            }
-                        }
-                        sub_ctx.val.p.set_string("self", pkg_name.clone());
-                        sub_ctx.val.p.set_string("触发", format!("{}.初始化", pkg_name));
-                        entry(&mut sub_ctx, &func.text);
-                        if sub_ctx.sys.stop { self.sys.stop = true; }
-                        let init_out = sub_ctx.output.get();
-                        if !init_out.is_empty() {
-                            if !out.is_empty() { out.push('\n'); }
-                            out.push_str(&init_out);
-                        }
-                        for (k, v) in sub_ctx.val.p.get_all() {
-                            let pkg_key = format!("{}.{}", pkg_name, k);
-                            self.val.p.set_val(&pkg_key, v.clone());
-                            self.val.set_g_val(&pkg_key, v.clone());
-                        }
-                    }
-                }
-            }
-        }
-        out
     }
 
     /// 查找匹配的内部词条或函数（O(1) HashMap 查找）
@@ -626,6 +523,12 @@ impl DicContext {
         shared.local_func_map = shared.local_func.iter().enumerate()
             .map(|(i, d)| (d.trigger.clone(), i))
             .collect();
+    }
+
+    /// 注入变量（同时设置局部和全局）
+    pub fn inject_var(&mut self, key: &str, value: String) {
+        self.val.p.set_string(key, value.clone());
+        self.val.set_g_string(key, value);
     }
 
     /// 解析 %包名.变量% 引入包变量（仅头部变量，不执行代码）
@@ -712,43 +615,24 @@ impl DicContext {
             }
         }
 
-        // 防递归：若该文件正在加载中，报错
-        let canon = std::path::Path::new(&actual_path).canonicalize().unwrap_or_else(|_| std::path::Path::new(&actual_path).to_path_buf());
-        let canon_str = canon.to_string_lossy().to_string();
-        if !self.reloading_dirs.insert(canon_str.clone()) {
-            let file_info = self.sys.file_location();
-            self.output.add(&format!("[错误] {}循环引入：{}（#引入={}）\n", file_info, actual_path, path));
-            self.sys.stop = true;
-            return;
-        }
-
-        // 检查文件是否存在
-        if !std::path::Path::new(&actual_path).is_file() {
-            let file_info = self.sys.file_location();
-            self.output.add(&format!("[错误] {}引入目标不存在：{}（#引入={}）\n", file_info, actual_path, path));
-            self.sys.stop = true;
-            return;
-        }
-
-        // 检查文件修改时间，仅在文件变更时重新加载
-        let data = file_lock::with_file_read(std::path::Path::new(&actual_path), || {
-            if let Ok(metadata) = std::fs::metadata(&actual_path) {
-                if let Ok(mtime) = metadata.modified() {
-                    let shared = Arc::make_mut(&mut self.shared);
-                    if let Some(&last_mtime) = shared.package_mtimes.get(pkg_name) {
-                        if mtime <= last_mtime {
-                            return None; // 文件未修改，跳过
-                        }
-                    }
-                    shared.package_mtimes.insert(pkg_name.to_string(), mtime);
-                }
+        // 防循环引入
+        let canon_str;
+        {
+            let canon = std::path::Path::new(&actual_path).canonicalize().unwrap_or_else(|_| std::path::Path::new(&actual_path).to_path_buf());
+            canon_str = canon.to_string_lossy().to_string();
+            // 防递归：若该文件正在加载中，报错
+            if !self.reloading_dirs.insert(canon_str.clone()) {
+                let file_info = self.sys.file_location();
+                self.output.add(&format!("[错误] {}循环引入：{}（#引入={}）\n", file_info, actual_path, path));
+                self.sys.stop = true;
+                return;
             }
-            std::fs::read_to_string(&actual_path).ok()
-        });
-        let Some(data) = data else { return; };
+        }
+        let data = std::fs::read_to_string(&actual_path).ok();
+        let Some(data) = data else { self.reloading_dirs.remove(&canon_str); return; };
         crate::parser::invalidate_parse_cache(&actual_path);
         if let Ok(pkg_bv) = crate::parser::build_dic(&actual_path, &data) {
-            // 处理头部赋值行（引入包不执行非赋值 head 行）
+            // 处理头部赋值行和可执行行
             for line in &pkg_bv.head {
                 let (pv_type, pv_prefix, pv_suffix) = val_text_test(line);
                 if pv_type == 6 && !pv_prefix.is_empty() {
@@ -759,23 +643,8 @@ impl DicContext {
                         processed
                     };
                     self.val.p.set_string(&pv_prefix, final_val.clone());
-                }
-            }
-            // 执行包的 [f]初始化 — 用临时 ctx 避免污染当前输出
-            for func in &pkg_bv.local_func {
-                if func.trigger == "初始化" {
-                    let mut tmp_ctx = self.clone();
-                    tmp_ctx.output.clear();
-                    tmp_ctx.sys.source_file = if func.source_file.is_empty() { actual_path.clone() } else { func.source_file.clone() };
-                    tmp_ctx.sys.line_offset = func.line;
-                    tmp_ctx.val.p.set_string("触发", format!("{}.初始化", pkg_name));
-                    tmp_ctx.val.p.set_string("self", pkg_name.to_string());
-                    entry(&mut tmp_ctx, &func.text);
-                    if tmp_ctx.sys.stop { self.sys.stop = true; }
-                    let init_out = tmp_ctx.output.get();
-                    if !init_out.is_empty() {
-                        self.output.add(&init_out);
-                    }
+                } else if !line.trim().is_empty() {
+                    entry(self, &[line.clone()]);
                 }
             }
             // 标准库包：注册函数到 builtins
@@ -790,6 +659,7 @@ impl DicContext {
             let shared = Arc::make_mut(&mut self.shared);
             shared.packages.insert(pkg_name.to_string(), pkg_bv);
         }
+        self.reloading_dirs.remove(&canon_str);
     }
 
     /// 运行时重新加载文件夹类型的 #引入= 包
@@ -816,7 +686,7 @@ impl DicContext {
         if std::path::Path::new(&nr_file).is_file() {
             if let Ok(data) = file_lock::with_file_read(std::path::Path::new(&nr_file), || std::fs::read_to_string(&nr_file)) {
                 if let Ok(file_bv) = crate::parser::build_dic(&nr_file, &data) {
-                    // 处理头部赋值行（引入包不执行非赋值 head 行）
+                    // 处理头部赋值行和可执行行
                     for line in &file_bv.head {
                         let (pv_type, pv_prefix, pv_suffix) = val_text_test(line);
                         if pv_type == 6 && !pv_prefix.is_empty() {
@@ -827,22 +697,8 @@ impl DicContext {
                                 processed
                             };
                             self.val.p.set_string(&pv_prefix, final_val.clone());
-                        }
-                    }
-                    for func in &file_bv.local_func {
-                        if func.trigger == "初始化" {
-                            let mut tmp_ctx = self.clone();
-                            tmp_ctx.output.clear();
-                            tmp_ctx.sys.source_file = nr_file.clone();
-                            tmp_ctx.sys.line_offset = func.line;
-                            tmp_ctx.val.p.set_string("触发", format!("{}.初始化", pkg_name));
-                            tmp_ctx.val.p.set_string("self", pkg_name.to_string());
-                            entry(&mut tmp_ctx, &func.text);
-                            if tmp_ctx.sys.stop { self.sys.stop = true; }
-                            let init_out = tmp_ctx.output.get();
-                            if !init_out.is_empty() {
-                                self.output.add(&init_out);
-                            }
+                        } else if !line.trim().is_empty() {
+                            entry(self, &[line.clone()]);
                         }
                     }
                 }
@@ -852,7 +708,7 @@ impl DicContext {
         crate::parser::invalidate_parse_cache(dir_path);
         match crate::parser::merge_dir_package(dir_path) {
             Ok(merged_bv) => {
-                // 处理头部赋值行（引入包不执行非赋值 head 行）
+                // 处理头部赋值行和可执行行
                 for line in &merged_bv.head {
                     let (pv_type, pv_prefix, pv_suffix) = val_text_test(line);
                     if pv_type == 6 && !pv_prefix.is_empty() {
@@ -863,23 +719,8 @@ impl DicContext {
                             processed
                         };
                         self.val.p.set_string(&pv_prefix, final_val.clone());
-                    }
-                }
-                // 执行 [f]初始化
-                for func in &merged_bv.local_func {
-                    if func.trigger == "初始化" {
-                        let mut tmp_ctx = self.clone();
-                        tmp_ctx.output.clear();
-                        tmp_ctx.sys.source_file = if func.source_file.is_empty() { dir_path.to_string() } else { func.source_file.clone() };
-                        tmp_ctx.sys.line_offset = func.line;
-                        tmp_ctx.val.p.set_string("触发", format!("{}.初始化", pkg_name));
-                        tmp_ctx.val.p.set_string("self", pkg_name.to_string());
-                        entry(&mut tmp_ctx, &func.text);
-                        if tmp_ctx.sys.stop { self.sys.stop = true; }
-                        let init_out = tmp_ctx.output.get();
-                        if !init_out.is_empty() {
-                            self.output.add(&init_out);
-                        }
+                    } else if !line.trim().is_empty() {
+                        entry(self, &[line.clone()]);
                     }
                 }
                 // 标准库包：检查并注册函数
@@ -900,6 +741,7 @@ impl DicContext {
                 self.sys.stop = true;
             }
         }
+        self.reloading_dirs.remove(&canon_str);
     }
 
     /// 正则匹配内部词条（用于 $回调$），trigger 为模式，匹配输入
@@ -946,8 +788,7 @@ impl DicContext {
                 let (v_type, v_prefix, v_suffix) = val_text_test(line);
                 if v_type == 6 && !v_prefix.is_empty() {
                     let value = sub_ctx.val.text(&v_suffix);
-                    sub_ctx.val.p.set_string(&v_prefix, value.clone());
-                    sub_ctx.val.set_g_string(&v_prefix, value);
+                    sub_ctx.inject_var(&v_prefix, value);
                 }
             }
             for line in &pkg_data.head {
@@ -1604,7 +1445,6 @@ impl DicContext {
                 star_import_funcs: self.shared.star_import_funcs.clone(),
                 triggers: Vec::new(),
                 init_lines: Vec::new(),
-                package_mtimes: self.shared.package_mtimes.clone(),
             }),
             reloading_dirs: self.reloading_dirs.clone(),
         }
@@ -2859,39 +2699,8 @@ impl Nebula {
 
     /// 执行头部初始化代码（主词库 + 所有引入包的非变量行统一执行）
     pub fn exec_init(&mut self) -> &mut Self {
-        let build = self.build.clone();
         let lines = std::mem::take(&mut Arc::make_mut(&mut self.ctx.shared).init_lines);
         entry(&mut self.ctx, &lines);
-        // 执行主词库自身的 [f]初始化
-        for func in &build.local_func {
-            if func.trigger == "初始化" {
-                // 快照当前变量和包，用于执行后清理局部变量/包
-                let pre_keys: std::collections::HashSet<String> = self.ctx.val.p.get_all()
-                    .iter().map(|(k, _)| k.clone()).collect();
-                let pre_pkgs: std::collections::HashSet<String> = self.ctx.shared.packages
-                    .keys().cloned().collect();
-                self.ctx.val.p.set_string("触发", "初始化".to_string());
-                entry(&mut self.ctx, &func.text);
-                // 清除执行中新增的无 . 前缀的局部变量
-                let leaked: Vec<String> = self.ctx.val.p.get_all().iter()
-                    .filter(|(k, _)| !pre_keys.contains(*k) && !k.starts_with('.') && k.as_str() != "触发")
-                    .map(|(k, _)| k.clone())
-                    .collect();
-                for k in &leaked {
-                    self.ctx.val.p.remove(k);
-                }
-                // 清除执行中新增的无 . 前缀对应变量名的包
-                // （包名已剥离 . 前缀，通过 .{pkg_name} 变量是否存在来判断是否保留）
-                let leaked_pkgs: Vec<String> = self.ctx.shared.packages.keys()
-                    .filter(|k| !pre_pkgs.contains(*k) 
-                        && self.ctx.val.p.is_empty_val(&format!(".{}", k)))
-                    .cloned()
-                    .collect();
-                for k in &leaked_pkgs {
-                    Arc::make_mut(&mut self.ctx.shared).packages.remove(k);
-                }
-            }
-        }
         self
     }
 

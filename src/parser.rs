@@ -16,7 +16,6 @@ pub struct BuildDic {
     pub trigger: String,
     pub text: Vec<String>,
     pub line: usize, // 原始文件中的起始行号（从 0 开始）
-    pub source_file: String, // 来源文件路径（用于错误报告）
 }
 
 impl Default for BuildDic {
@@ -25,7 +24,6 @@ impl Default for BuildDic {
             trigger: String::new(),
             text: Vec::new(),
             line: 0,
-            source_file: String::new(),
         }
     }
 }
@@ -484,7 +482,6 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
                     trigger: trigger_name.clone(),
                     text: dic_texts.clone(),
                     line: trigger_line,
-                    source_file: _dic_path.to_string(),
                 };
 
                 // 重复命名检测（各分类独立）

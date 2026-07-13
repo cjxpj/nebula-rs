@@ -8,6 +8,7 @@ use std::io::Read;
 use std::collections::HashMap;
 use std::sync::{Mutex, LazyLock};
 use std::io::Write;
+use ed25519_dalek::{Signer, SigningKey};
 
 // 非池用途的简单自增计数器（如 multipart boundary）
 static SEQ_ID: AtomicUsize = AtomicUsize::new(0);
@@ -442,6 +443,34 @@ fn divmod_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
     Some(serde_json::json!([div, rem]).to_string())
 }
 
+/// $ed25519签名 seed msg$ — 从 32 字节种子生成 ed25519 密钥对，对消息签名
+/// 返回 64 字节签名（latin-1 编码字符串，每个字符为一个字节，需配合 $hex编码$ 使用）
+fn ed25519_sign_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let seed_str = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let msg_str = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+
+    // 取前 32 字节作为种子（对标 Go: seed = secret[:32]）
+    let seed_bytes_raw = seed_str.as_bytes();
+    let mut seed = [0u8; 32];
+    let len = seed_bytes_raw.len().min(32);
+    seed[..len].copy_from_slice(&seed_bytes_raw[..len]);
+
+    let signing_key = SigningKey::from_bytes(&seed);
+    let signature = signing_key.sign(msg_str.as_bytes());
+
+    // 64 字节签名 → latin-1 字符串（每字节映射为一个字符，可无损往返）
+    let sig_str: String = signature.to_bytes().iter().map(|&b| b as char).collect();
+    Some(sig_str)
+}
+
+/// $hex编码 data$ — 将字节字符串转为十六进制表示
+/// 每个字节转为两个 hex 字符，如 "abc" → "616263"
+fn hex_encode_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+    let data = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let hex_str: String = data.chars().map(|c| format!("{:02x}", c as u8)).collect();
+    Some(hex_str)
+}
+
 // ==================== 辅助函数 ====================
 
 /// 将 serde_json::Value 转为可排序的字符串
@@ -551,6 +580,8 @@ pub fn register_builtins(ctx: &mut DicContext) {
     builtins.insert("访问".to_string(), access_get_fn);
     builtins.insert("访问POST".to_string(), access_post_fn);
     builtins.insert("访问转发".to_string(), request_forward_fn);
+    builtins.insert("ed25519签名".to_string(), ed25519_sign_fn);
+    builtins.insert("hex编码".to_string(), hex_encode_fn);
 
     // ===== 内置基础函数 =====
     builtins.insert("范围".to_string(), range_fn);
@@ -2738,7 +2769,7 @@ fn read_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) ->
     }
 }
 
-/// $写 路径 键 值$ — 将键值对写入 database/ 下的键值文件
+/// $写 路径 键 值$ — 将键值对写入指定路径的键值文件
 /// 文件格式：首行为更新时间，后续每行为 key=value
 fn write_key_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let key = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
@@ -2747,7 +2778,7 @@ fn write_key_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &st
     if key.is_empty() {
         return Some(format!("[错误] {} 写 需要路径参数", ctx.sys.file_location()));
     }
-    let path = format!("database/{}", key);
+    let path = key.clone();
     let path_buf = std::path::PathBuf::from(&path);
     file_lock::with_file_write(&path_buf, || {
         let data = std::fs::read_to_string(&path).unwrap_or_default();
@@ -2784,14 +2815,14 @@ fn write_key_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &st
     None
 }
 
-/// $读 路径 [键] [默认值]$ — 读取 database/ 下的键值文件
+/// $读 路径 [键] [默认值]$ — 读取指定路径的键值文件
 /// 不传键时返回全部键值对的 JSON 数组；传键时查找对应值，未找到返回默认值
 fn read_key_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let key = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     if key.is_empty() {
         return Some("[]".to_string());
     }
-    let path = format!("database/{}", key);
+    let path = key.clone();
     let path_buf = std::path::PathBuf::from(&path);
     let data = match file_lock::with_file_read(&path_buf, || std::fs::read_to_string(&path)) {
         Ok(s) => s,
@@ -3371,8 +3402,7 @@ pub(crate) fn process_pkg_head_vars(parent_val: &crate::value::DicVal, sub_ctx: 
             } else {
                 sub_ctx.val.text(&v_suffix)
             };
-            sub_ctx.val.p.set_string(&v_prefix, value.clone());
-            sub_ctx.val.set_g_string(&v_prefix, value);
+            sub_ctx.inject_var(&v_prefix, value);
         }
     }
 }
