@@ -41,7 +41,7 @@ function isActive(link) {
           <a v-if="item.link" :href="buildHref(item.link)" :class="['sidebar-section-title', 'sidebar-section-link', { active: isActive(item.link) }]">{{ item.text }}</a>
           <p v-else class="sidebar-section-title">{{ item.text }}</p>
           <template v-for="child in (item.children || [])" :key="child.link || child.text">
-            <!-- child has link but no children: plain link -->
+            <!-- 子项有链接但无子项：普通链接 -->
             <a
               v-if="child.link && !child.children"
               :href="buildHref(child.link)"
@@ -49,12 +49,12 @@ function isActive(link) {
             >
               {{ child.text }}
             </a>
-            <!-- child has children (always visible) -->
+            <!-- 子项有子项（始终可见） -->
             <template v-else-if="child.children">
               <p class="sidebar-sub-title">{{ child.text }}</p>
               <div class="sidebar-sub-group">
                 <template v-for="sub in child.children" :key="sub.link || sub.text">
-                  <!-- sub with link but no children: plain link -->
+                  <!-- 子子项有链接但无子项：普通链接 -->
                   <a
                     v-if="sub.link && !sub.children"
                     :href="buildHref(sub.link)"
@@ -62,7 +62,7 @@ function isActive(link) {
                   >
                     {{ sub.text }}
                   </a>
-                  <!-- sub with children: simple link -->
+                  <!-- 子子项有子项：简单链接 -->
                   <a v-else-if="sub.children && sub.link"
                     :href="buildHref(sub.link)"
                     :class="['sidebar-link', 'sidebar-link-fn', { active: isActive(sub.link) }]"

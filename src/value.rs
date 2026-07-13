@@ -441,11 +441,11 @@ impl Val {
     /// 原始变量查找（不含指针解引用）
     fn lookup_display_raw(key: &str, local: &HashMap<String, Value>, global: Option<&HashMap<String, Value>>) -> String {
 
-        // Check local
+        // 查找本地变量
         if let Some(v) = local.get(key) {
             return v.display();
         }
-        // Check global
+        // 查找全局变量
         if let Some(g) = global {
             if let Some(v) = g.get(key) {
                 return v.display();

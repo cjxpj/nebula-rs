@@ -207,7 +207,7 @@ struct AccessRequest {
     url: String,
     headers: HashMap<String, String>,
     timeout: usize,           // 超时秒数，0 表示默认 15s
-    files: HashMap<String, HashMap<String, Vec<u8>>>, // field → (filename → data)
+    files: HashMap<String, HashMap<String, Vec<u8>>>, // 字段 → (文件名 → 数据)
     body: String,
     response: Option<AccessResponse>,
     stop_redirect: bool,
@@ -758,7 +758,7 @@ fn print_core(ctx: &mut DicContext, args: &[String]) -> String {
     result
 }
 
-/// $打印 内容$ — 直接输出到 stdout，不返回（支持 %var% 和 [expr]）
+/// $打印 内容$ — 直接输出到标准输出，不返回（支持 %var% 和 [expr]）
 fn print_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     print_core(ctx, args);
     None
@@ -1311,7 +1311,7 @@ fn len_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Strin
     Some(result.chars().count().to_string())
 }
 
-/// $截取 [字符串] [起始] [长度]$ — 提取子串（0-based，长度可选）
+/// $截取 [字符串] [起始] [长度]$ — 提取子串（下标从0开始，长度可选）
 fn substr_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
     let start: usize = args
@@ -1361,7 +1361,7 @@ fn trim_suffix_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
     }
 }
 
-/// 解析数值参数：先 %var% 替换，再 [expr] 求值，最后 parse
+/// 解析数值参数：先 %var% 替换，再 [expr] 求值，最后解析
 fn resolve_num(ctx: &DicContext, s: &str) -> Option<usize> {
     let v = crate::count::run_count_text(&ctx.val, &ctx.val.text_immut(s));
     v.trim().parse::<usize>().ok()
@@ -1418,7 +1418,7 @@ fn change_get_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Optio
     None
 }
 
-// ===== 访问.切换POST handle [body]$ — 切换为 POST 并可选设置 body =====
+// ===== 访问.切换POST handle [body]$ — 切换为 POST 并可选设置请求体 =====
 
 fn change_post_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let (id, offset) = get_req_id_and_offset(ctx, args);
@@ -1434,7 +1434,7 @@ fn change_post_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
     None
 }
 
-// ===== 访问.POST handle body$ — 设置 POST body =====
+// ===== 访问.POST handle body$ — 设置 POST 请求体 =====
 
 fn request_post_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let (id, offset) = get_req_id_and_offset(ctx, args);
@@ -1531,7 +1531,7 @@ fn set_timeout_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
     None
 }
 
-// ===== 访问.发送 handle$ — 发送请求，结果存入 response =====
+// ===== 访问.发送 handle$ — 发送请求，结果存入响应字段 =====
 
 fn request_send_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let (id, _) = get_req_id_and_offset(ctx, args);
@@ -1556,7 +1556,7 @@ fn request_send_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opt
             for (k, v) in &req.headers { r = r.header(k, v); }
             r.call().map_err(|e| format!("发送失败: {}", e))?
         } else {
-            // POST：决定 body 类型
+            // POST：决定请求体类型
             if !req.files.is_empty() {
                 // multipart 上传
                 let boundary = format!("nebula-boundary-{}", next_seq_id());
@@ -1620,7 +1620,7 @@ fn build_multipart_body(req: &AccessRequest, boundary: &str) -> Vec<u8> {
             write!(&mut buf, "\r\n").unwrap();
         }
     }
-    // 附加 body 中的字段
+    // 附加请求体中的字段
     if !req.body.is_empty() {
         if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&req.body) {
             for (k, v) in &map {
@@ -1641,7 +1641,7 @@ fn build_multipart_body(req: &AccessRequest, boundary: &str) -> Vec<u8> {
     buf
 }
 
-// ===== 访问.全部内容 handle$ — 返回完整响应 JSON（含状态、头部、data 已屏蔽）=====
+// ===== 访问.全部内容 handle$ — 返回完整响应 JSON（含状态、头部、数据已屏蔽）=====
 
 fn request_all_content_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let (id, _) = get_req_id_and_offset(ctx, args);
@@ -1668,7 +1668,7 @@ fn request_all_content_fn(ctx: &mut DicContext, args: &[String], _content: &str)
     Some(json_val.to_string())
 }
 
-// ===== 访问.内容 handle$ — 返回响应 body 文本 =====
+// ===== 访问.内容 handle$ — 返回响应体文本 =====
 
 fn request_content_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let (id, _) = get_req_id_and_offset(ctx, args);
@@ -1799,7 +1799,7 @@ fn request_forward_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> 
         // 复制原始头部（跳过不需要转发的）
         let skip_headers = ["Host", "Content-Length", "Transfer-Encoding", "Connection", "Keep-Alive", "Proxy-Connection", "Upgrade"];
 
-        // 准备 POST body
+        // 准备 POST 请求体
         let post_body = if (method_upper == "POST" || method_upper == "PUT") && !req_data["post"].is_null() {
             let post_str = req_data["post"].to_string();
             if post_str == "{}" {
@@ -2667,7 +2667,7 @@ fn format_local_time() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    // UTC+8
+    // UTC+8 时区
     let total_secs = now.as_secs().saturating_add(8 * 3600);
     let day_secs = total_secs % 86400;
     let h = day_secs / 3600;

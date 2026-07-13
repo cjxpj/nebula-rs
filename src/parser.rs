@@ -15,7 +15,7 @@ fn parse_cache() -> &'static Mutex<HashMap<String, BuildValue>> {
 pub struct BuildDic {
     pub trigger: String,
     pub text: Vec<String>,
-    pub line: usize, // 原始文件中的起始行号 (0-based)
+    pub line: usize, // 原始文件中的起始行号（从 0 开始）
     pub source_file: String, // 来源文件路径（用于错误报告）
 }
 
@@ -360,7 +360,7 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
                 } else {
                     return Err(format!("[错误] {} 第{}行: 引入目标不存在：{}（#引入={}）", _dic_path, dic_i + 1, single_path, single_path));
                 }
-                } // end-of for single_path
+                } // 单路径 for 循环结束
                 runheadtext.push(line);
                 continue;
             }
@@ -617,7 +617,7 @@ pub fn merge_dir_package(dir_path: &str) -> Result<BuildValue, String> {
             if let Some(cached) = cache.get(&cache_key) {
                 cached.clone()
             } else {
-                drop(cache); // avoid holding lock during I/O
+                drop(cache); // I/O 期间释放锁
                 let data = file_lock::with_file_read(&p, || {
                     fs::read_to_string(&p)
                         .map_err(|e| format!("[错误] 无法读取文件 '{}': {}", fname, e))

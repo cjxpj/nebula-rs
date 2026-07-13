@@ -12,7 +12,7 @@ pub trait CondEval {
 
 /// 条件表达式求值器
 /// 支持操作符: == != >= <= > < ~= in
-/// 逻辑: && (AND) || (OR) & | ( ) 括号
+/// 逻辑：&&（与）||（或）& | ( ) 括号
 pub struct IfText;
 
 impl IfText {
@@ -100,7 +100,7 @@ impl IfText {
             }
         }
 
-        // 组装 Parsed Token
+        // 组装已解析的 Token
         let mut parsed = Vec::new();
         let mut i = 0;
         let tokens_len = tokens.len();
@@ -260,7 +260,7 @@ impl IfText {
             let a = count::run_count_text(ctx.val(), &a_raw);
 
             let val = if p.b.is_empty() {
-                // 单操作数：truthy 判断
+                // 单操作数：真值判断
                 !matches!(a.as_str(), "" | "0" | "false" | "null")
             } else {
                 // 对操作数 c 执行同样处理

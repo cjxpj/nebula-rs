@@ -88,7 +88,7 @@ pub fn run_update(asset_filter: &str) -> Result<(), String> {
 struct ReleaseInfo {
     tag: String,
     body: String,
-    assets: Vec<(String, String)>, // (name, browser_download_url)
+    assets: Vec<(String, String)>, // (名称, 浏览器下载地址)
 }
 
 fn fetch_latest_release(repo: &str) -> Result<ReleaseInfo, String> {
@@ -216,7 +216,7 @@ fn apply_update(exe_data: &[u8]) -> Result<(), String> {
 
 #[cfg(not(windows))]
 fn apply_update(exe_data: &[u8]) -> Result<(), String> {
-    // Linux/macOS: 直接写入并替换
+    // Linux/macOS 平台：直接写入并替换
     let current_exe =
         std::env::current_exe().map_err(|e| format!("无法获取当前程序路径: {}", e))?;
     let new_exe = current_exe.with_file_name(format!("{}_new", CURRENT_NAME));

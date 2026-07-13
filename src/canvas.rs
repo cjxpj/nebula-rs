@@ -735,7 +735,7 @@ pub fn draw_gaussian_blur(args: &[String]) -> Result<Option<String>, String> {
     let rh = (y2 - y) as usize;
     let px_count = rw * rh;
 
-    // Step 1: 分离式盒模糊 —— 前缀和 O(W*H)，原算法 O(W*H*r²)
+    // 第一步：分离式盒模糊 —— 前缀和 O(W*H)，原算法 O(W*H*r²)
     let mut buf_a = vec![0u32; px_count * 4];
     let mut buf_b = vec![0u32; px_count * 4];
 
@@ -1484,7 +1484,7 @@ pub fn draw_flood_fill(args: &[String]) -> Result<Option<String>, String> {
         return Ok(None);
     }
 
-    // BFS flood fill — 直接操作像素数组，无需 visited 数组
+    // BFS 洪水填充 — 直接操作像素数组，无需已访问标记数组
     use std::collections::VecDeque;
     let w = canvas.width as usize;
     let w_i = canvas.width as i32;

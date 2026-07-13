@@ -1,10 +1,10 @@
-﻿//! AST parser and tree-walking executor for the Nebula DSL.
-//! Replaces the ~1200-line state machine in interpreter.rs::entry().
+//! Nebula DSL 的 AST 解析器与树遍历执行器。
+//! 替代 interpreter.rs::entry() 中约 1200 行的状态机。
 //!
-//! Modern DSL syntax (replaces the old entry() state machine):
+//! 现代 DSL 语法（替代旧的 entry() 状态机）：
 //!   Output:     任何无赋值操作符的行
 //!   Assign:     key:value, key+:value, key-:value, key*:value, key/:value, key%:value
-//!   Loop:       循环>var=N ... <循环   or   循环>var ... <循环 (无限)
+//!   Loop:       循环>var=N ... <循环   或   循环>var ... <循环 (无限)
 //!   If/Else:    如果:cond ... 如果尾
 //!   ForEach:    遍历>var,array ... <遍历
 //!   FuncCall:   $func args$
@@ -27,7 +27,7 @@ use crate::functions::parse_param_defs;
 use crate::functions::fuzzy_search_pkg_method;
 use crate::interpreter::DicContext;
 
-/* ===================== ExecResult ===================== */
+/* ===================== 执行结果 ===================== */
 
 /// 语句块执行结果
 #[derive(Debug, Clone, PartialEq)]
@@ -42,7 +42,7 @@ pub enum ExecResult {
     Goto(isize),
 }
 
-/* ===================== Parser ===================== */
+/* ===================== 解析器 ===================== */
 
 /// 将 DSL 代码块解析为 AST 语句列表
 pub fn parse_stmts(lines: &[String], _is_sub_package: bool, line_offset: usize, source_file: &str) -> Result<Vec<Stmt>, String> {
@@ -978,7 +978,7 @@ fn find_op_outside_parens(chars: &[char], ops: &[char], _right_to_left: bool) ->
     found
 }
 
-/* ===================== Executor ===================== */
+/* ===================== 执行器 ===================== */
 
 /// 执行 AST 语句列表（顶层入口，自动预扫描标签）
 pub fn exec_stmts(ctx: &mut DicContext, stmts: &[Stmt]) -> ExecResult {
@@ -2798,7 +2798,7 @@ mod tests {
         assert_eq!(prefix, "@a[啊]");
         assert_eq!(suffix, "不啊");
 
-        // JSON 路径赋值 without @: a[啊]:不啊
+        // JSON 路径赋值（不带 @）：a[啊]:不啊
         let (v_type, prefix, suffix) = crate::analyzer::val_text_test("a[0]:val");
         assert_eq!(v_type, 6);
         assert_eq!(prefix, "a[0]");
@@ -2915,7 +2915,7 @@ mod tests {
 
     #[test]
     fn trace_json_array_flow() {
-        // Simulate the JSON array from dic.nr [f]main
+        // 模拟 dic.nr [f]main 中的 JSON 数组
         let parts = vec![
             "a,",
             "b,",
@@ -2926,10 +2926,10 @@ mod tests {
             "啊::啊,",
         ];
         
-        // Step 1: build_json_value
+        // 步骤 1：build_json_value
         match build_json_value(&parts, "[", 1, 0, "test") {
             Ok(json_str) => {
-                // Step 2: verify serde_json can parse it
+                // 步骤 2：验证 serde_json 能否解析
                 let _ = serde_json::from_str::<serde_json::Value>(&json_str);
             }
             Err(_) => {}

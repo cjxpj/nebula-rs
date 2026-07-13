@@ -1,5 +1,4 @@
-﻿use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::SystemTime;
 use crate::value::DicVal;
@@ -954,7 +953,7 @@ impl DicContext {
             for line in &pkg_data.head {
                 let (v_type, v_prefix, _) = val_text_test(line);
                 if v_type != 6 || v_prefix.is_empty() {
-                    entry(&mut sub_ctx, std::slice::from_ref(line));
+                    entry(&mut sub_ctx, &[line.clone()]);
                 }
             }
         }
@@ -989,7 +988,7 @@ impl DicContext {
         let prefix = format!("{} ", func_name);
         for item in &self.shared.local_func {
             if item.trigger == func_name {
-                // line_offset = BuildDic.line + 1 (1-based file line of first body line)
+                // line_offset = BuildDic.line + 1（1-based，函数首行体的文件行号）
                 return Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1));
             }
             if item.trigger.starts_with(&prefix) {
@@ -1664,9 +1663,9 @@ impl crate::iftext::CondEval for DicContext {
 
 /// 预编译的循环体：将 `x:[%i%+1]` 编译为原生 i+1，跳过 entry/text/count
 enum LoopJit {
-    /// var:[%loop_var% op const]
+    /// var:[%loop_var% op const]  — 二元运算赋值
     BinOp { target: String, op: u8, operand: f64 },
-    /// var:[%loop_var%]
+    /// var:[%loop_var%]  — 变量值拷贝
     Copy { target: String },
     /// var+:[%loop_var% op const]  — 自增常量
     AddAssign { target: String, op: u8, operand: f64 },
@@ -2378,7 +2377,7 @@ fn entry_fallback(ctx: &mut DicContext, txt: &[String]) {
             ctx.sys.if_func.jump = true;
             return;
         }
-        // Go-style goto label
+        // Go 风格的 goto 标签
         if let Some(label) = text.strip_prefix("goto ") {
             let label = label.trim();
             if let Some(&target) = labels.get(label) {

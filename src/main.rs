@@ -30,7 +30,7 @@ fn enable_ansi() {
                 SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
             }
         }
-        // Also enable for stderr
+        // 同时为 stderr 启用 ANSI 支持
         const STD_ERROR_HANDLE: u32 = 0xFFFFFFF4; // -12
         let err_handle = GetStdHandle(STD_ERROR_HANDLE);
         if err_handle != -1isize && err_handle != 0 {
