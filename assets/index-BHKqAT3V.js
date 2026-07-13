@@ -24,7 +24,7 @@ var Ol=Object.defineProperty;var El=(n,e,t)=>e in n?Ol(n,e,{enumerable:!0,config
  * @license MIT
  */let Uu=()=>location.protocol+"//"+location.host;function dl(n,e){const{pathname:t,search:s,hash:i}=e,r=n.indexOf("#");if(r>-1){let o=i.includes(n.slice(r))?n.slice(r).length:1,l=i.slice(o);return l[0]!=="/"&&(l="/"+l),Or(l,"")}return Or(t,n)+s+i}function zu(n,e,t,s){let i=[],r=[],o=null;const l=({state:p})=>{const g=dl(n,location),y=t.value,w=e.value;let N=0;if(p){if(t.value=g,e.value=p,o&&o===y){o=null;return}N=w?p.position-w.position:0}else s(g);i.forEach(M=>{M(t.value,y,{delta:N,type:Vs.pop,direction:N?N>0?Ps.forward:Ps.back:Ps.unknown})})};function a(){o=t.value}function u(p){i.push(p);const g=()=>{const y=i.indexOf(p);y>-1&&i.splice(y,1)};return r.push(g),g}function c(){if(document.visibilityState==="hidden"){const{history:p}=window;if(!p.state)return;p.replaceState(K({},p.state,{scroll:ps()}),"")}}function f(){for(const p of r)p();r=[],window.removeEventListener("popstate",l),window.removeEventListener("pagehide",c),document.removeEventListener("visibilitychange",c)}return window.addEventListener("popstate",l),window.addEventListener("pagehide",c),document.addEventListener("visibilitychange",c),{pauseListeners:a,listen:u,destroy:f}}function Nr(n,e,t,s=!1,i=!1){return{back:n,current:e,forward:t,replaced:s,position:window.history.length,scroll:i?ps():null}}function Vu(n){const{history:e,location:t}=window,s={value:dl(n,t)},i={value:e.state};i.value||r(s.value,{back:null,current:s.value,forward:null,position:e.length-1,replaced:!0,scroll:null},!0);function r(a,u,c){const f=n.indexOf("#"),p=f>-1?(t.host&&document.querySelector("base")?n:n.slice(f))+a:Uu()+n+a;try{e[c?"replaceState":"pushState"](u,"",p),i.value=u}catch(g){console.error(g),t[c?"replace":"assign"](p)}}function o(a,u){r(a,K({},e.state,Nr(i.value.back,a,i.value.forward,!0),u,{position:i.value.position}),!0),s.value=a}function l(a,u){const c=K({},i.value,e.state,{forward:a,scroll:ps()});r(c.current,c,!0),r(a,K({},Nr(s.value,a,null),{position:c.position+1},u),!1),s.value=a}return{location:s,state:i,push:l,replace:o}}function Gu(n){n=Ou(n);const e=Vu(n),t=zu(n,e.state,e.location,e.replace);function s(r,o=!0){o||t.pauseListeners(),history.go(r)}const i=K({location:"",base:n,go:s,createHref:Pu.bind(null,n)},e,t);return Object.defineProperty(i,"location",{enumerable:!0,get:()=>e.location.value}),Object.defineProperty(i,"state",{enumerable:!0,get:()=>e.state.value}),i}function Ju(n){return n=location.host?n||location.pathname+location.search:"",n.includes("#")||(n+="#"),Gu(n)}let Pe=function(n){return n[n.Static=0]="Static",n[n.Param=1]="Param",n[n.Group=2]="Group",n}({});var pn=function(n){return n[n.Static=0]="Static",n[n.Param=1]="Param",n[n.ParamRegExp=2]="ParamRegExp",n[n.ParamRegExpEnd=3]="ParamRegExpEnd",n[n.EscapeNext=4]="EscapeNext",n}(pn||{});const Ku={type:Pe.Static,value:""},qu=/[a-zA-Z0-9_]/;function Wu(n){if(!n)return[[]];if(n==="/")return[[Ku]];if(!n.startsWith("/"))throw new Error(`Invalid path "${n}"`);function e(g){throw new Error(`ERR (${t})/"${u}": ${g}`)}let t=pn.Static,s=t;const i=[];let r;function o(){r&&i.push(r),r=[]}let l=0,a,u="",c="";function f(){u&&(t===pn.Static?r.push({type:Pe.Static,value:u}):t===pn.Param||t===pn.ParamRegExp||t===pn.ParamRegExpEnd?(r.length>1&&(a==="*"||a==="+")&&e(`A repeatable param (${u}) must be alone in its segment. eg: '/:ids+.`),r.push({type:Pe.Param,value:u,regexp:c,repeatable:a==="*"||a==="+",optional:a==="*"||a==="?"})):e("Invalid state to consume buffer"),u="")}function p(){u+=a}for(;l<n.length;){if(a=n[l++],a==="\\"&&t!==pn.ParamRegExp){s=t,t=pn.EscapeNext;continue}switch(t){case pn.Static:a==="/"?(u&&f(),o()):a===":"?(f(),t=pn.Param):p();break;case pn.EscapeNext:p(),t=s;break;case pn.Param:a==="("?t=pn.ParamRegExp:qu.test(a)?p():(f(),t=pn.Static,a!=="*"&&a!=="?"&&a!=="+"&&l--);break;case pn.ParamRegExp:a===")"?c[c.length-1]=="\\"?c=c.slice(0,-1)+a:t=pn.ParamRegExpEnd:c+=a;break;case pn.ParamRegExpEnd:f(),t=pn.Static,a!=="*"&&a!=="?"&&a!=="+"&&l--,c="";break;default:e("Unknown state");break}}return t===pn.ParamRegExp&&e(`Unfinished custom RegExp for param "${u}"`),f(),o(),i}const Ir="[^/]+?",Yu={sensitive:!1,strict:!1,start:!0,end:!0};var Sn=function(n){return n[n._multiplier=10]="_multiplier",n[n.Root=90]="Root",n[n.Segment=40]="Segment",n[n.SubSegment=30]="SubSegment",n[n.Static=40]="Static",n[n.Dynamic=20]="Dynamic",n[n.BonusCustomRegExp=10]="BonusCustomRegExp",n[n.BonusWildcard=-50]="BonusWildcard",n[n.BonusRepeatable=-20]="BonusRepeatable",n[n.BonusOptional=-8]="BonusOptional",n[n.BonusStrict=.7000000000000001]="BonusStrict",n[n.BonusCaseSensitive=.25]="BonusCaseSensitive",n}(Sn||{});const Zu=/[.+*?^${}()[\]/\\]/g;function Qu(n,e){const t=K({},Yu,e),s=[];let i=t.start?"^":"";const r=[];for(const u of n){const c=u.length?[]:[Sn.Root];t.strict&&!u.length&&(i+="/");for(let f=0;f<u.length;f++){const p=u[f];let g=Sn.Segment+(t.sensitive?Sn.BonusCaseSensitive:0);if(p.type===Pe.Static)f||(i+="/"),i+=p.value.replace(Zu,"\\$&"),g+=Sn.Static;else if(p.type===Pe.Param){const{value:y,repeatable:w,optional:N,regexp:M}=p;r.push({name:y,repeatable:w,optional:N});const E=M||Ir;if(E!==Ir){g+=Sn.BonusCustomRegExp;try{`${E}`}catch(A){throw new Error(`Invalid custom RegExp for param "${y}" (${E}): `+A.message)}}let C=w?`((?:${E})(?:/(?:${E}))*)`:`(${E})`;f||(C=N&&u.length<2?`(?:/${C})`:"/"+C),N&&(C+="?"),i+=C,g+=Sn.Dynamic,N&&(g+=Sn.BonusOptional),w&&(g+=Sn.BonusRepeatable),E===".*"&&(g+=Sn.BonusWildcard)}c.push(g)}s.push(c)}if(t.strict&&t.end){const u=s.length-1;s[u][s[u].length-1]+=Sn.BonusStrict}t.strict||(i+="/?"),t.end?i+="$":t.strict&&!i.endsWith("/")&&(i+="(?:/|$)");const o=new RegExp(i,t.sensitive?"":"i");function l(u){const c=u.match(o),f={};if(!c)return null;for(let p=1;p<c.length;p++){const g=c[p]||"",y=r[p-1];f[y.name]=g&&y.repeatable?g.split("/"):g}return f}function a(u){let c="",f=!1;for(const p of n){(!f||!c.endsWith("/"))&&(c+="/"),f=!1;for(const g of p)if(g.type===Pe.Static)c+=g.value;else if(g.type===Pe.Param){const{value:y,repeatable:w,optional:N}=g,M=y in u?u[y]:"";if(Vn(M)&&!w)throw new Error(`Provided param "${y}" is an array but it is not repeatable (* or + modifiers)`);const E=Vn(M)?M.join("/"):M;if(!E)if(N)p.length<2&&(c.endsWith("/")?c=c.slice(0,-1):f=!0);else throw new Error(`Missing required param "${y}"`);c+=E}}return c||"/"}return{re:o,score:s,keys:r,parse:l,stringify:a}}function Xu(n,e){let t=0;for(;t<n.length&&t<e.length;){const s=e[t]-n[t];if(s)return s;t++}return n.length<e.length?n.length===1&&n[0]===Sn.Static+Sn.Segment?-1:1:n.length>e.length?e.length===1&&e[0]===Sn.Static+Sn.Segment?1:-1:0}function hl(n,e){let t=0;const s=n.score,i=e.score;for(;t<s.length&&t<i.length;){const r=Xu(s[t],i[t]);if(r)return r;t++}if(Math.abs(i.length-s.length)===1){if(Lr(s))return 1;if(Lr(i))return-1}return i.length-s.length}function Lr(n){const e=n[n.length-1];return n.length>0&&e[e.length-1]<0}const nf={strict:!1,end:!0,sensitive:!1};function ef(n,e,t){const s=Qu(Wu(n.path),t),i=K(s,{record:n,parent:e,children:[],alias:[]});return e&&!i.record.aliasOf==!e.record.aliasOf&&e.children.push(i),i}function tf(n,e){const t=[],s=new Map;e=Rr(nf,e);function i(f){return s.get(f)}function r(f,p,g){const y=!g,w=Dr(f);w.aliasOf=g&&g.record;const N=Rr(e,f),M=[w];if("alias"in f){const A=typeof f.alias=="string"?[f.alias]:f.alias;for(const Y of A)M.push(Dr(K({},w,{components:g?g.record.components:w.components,path:Y,aliasOf:g?g.record:w})))}let E,C;for(const A of M){const{path:Y}=A;if(p&&Y[0]!=="/"){const an=p.record.path,Z=an[an.length-1]==="/"?"":"/";A.path=p.record.path+(Y&&Z+Y)}if(E=ef(A,p,N),g?g.alias.push(E):(C=C||E,C!==E&&C.alias.push(E),y&&f.name&&!jr(E)&&o(f.name)),pl(E)&&a(E),w.children){const an=w.children;for(let Z=0;Z<an.length;Z++)r(an[Z],E,g&&g.children[Z])}g=g||E}return C?()=>{o(C)}:bt}function o(f){if(ul(f)){const p=s.get(f);p&&(s.delete(f),t.splice(t.indexOf(p),1),p.children.forEach(o),p.alias.forEach(o))}else{const p=t.indexOf(f);p>-1&&(t.splice(p,1),f.record.name&&s.delete(f.record.name),f.children.forEach(o),f.alias.forEach(o))}}function l(){return t}function a(f){const p=of(f,t);t.splice(p,0,f),f.record.name&&!jr(f)&&s.set(f.record.name,f)}function u(f,p){let g,y={},w,N;if("name"in f&&f.name){if(g=s.get(f.name),!g)throw nt(un.MATCHER_NOT_FOUND,{location:f});N=g.record.name,y=K(Mr(p.params,g.keys.filter(C=>!C.optional).concat(g.parent?g.parent.keys.filter(C=>C.optional):[]).map(C=>C.name)),f.params&&Mr(f.params,g.keys.map(C=>C.name))),w=g.stringify(y)}else if(f.path!=null)w=f.path,g=t.find(C=>C.re.test(w)),g&&(y=g.parse(w),N=g.record.name);else{if(g=p.name?s.get(p.name):t.find(C=>C.re.test(p.path)),!g)throw nt(un.MATCHER_NOT_FOUND,{location:f,currentLocation:p});N=g.record.name,y=K({},p.params,f.params),w=g.stringify(y)}const M=[];let E=g;for(;E;)M.unshift(E.record),E=E.parent;return{name:N,path:w,params:y,matched:M,meta:rf(M)}}n.forEach(f=>r(f));function c(){t.length=0,s.clear()}return{addRoute:r,resolve:u,removeRoute:o,clearRoutes:c,getRoutes:l,getRecordMatcher:i}}function Mr(n,e){const t={};for(const s of e)s in n&&(t[s]=n[s]);return t}function Dr(n){const e={path:n.path,redirect:n.redirect,name:n.name,meta:n.meta||{},aliasOf:n.aliasOf,beforeEnter:n.beforeEnter,props:sf(n),children:n.children||[],instances:{},leaveGuards:new Set,updateGuards:new Set,enterCallbacks:{},components:"components"in n?n.components||null:n.component&&{default:n.component}};return Object.defineProperty(e,"mods",{value:{}}),e}function sf(n){const e={},t=n.props||!1;if("component"in n)e.default=t;else for(const s in n.components)e[s]=typeof t=="object"?t[s]:t;return e}function jr(n){for(;n;){if(n.record.aliasOf)return!0;n=n.parent}return!1}function rf(n){return n.reduce((e,t)=>K(e,t.meta),{})}function of(n,e){let t=0,s=e.length;for(;t!==s;){const r=t+s>>1;hl(n,e[r])<0?s=r:t=r+1}const i=lf(n);return i&&(s=e.lastIndexOf(i,s-1)),s}function lf(n){let e=n;for(;e=e.parent;)if(pl(e)&&hl(n,e)===0)return e}function pl({record:n}){return!!(n.name||n.components&&Object.keys(n.components).length||n.redirect)}function Hr(n){const e=Fn(gs),t=Fn(gi),s=mn(()=>{const a=dn(n.to);return e.resolve(a)}),i=mn(()=>{const{matched:a}=s.value,{length:u}=a,c=a[u-1],f=t.matched;if(!c||!f.length)return-1;const p=f.findIndex(Xe.bind(null,c));if(p>-1)return p;const g=Br(a[u-2]);return u>1&&Br(c)===g&&f[f.length-1].path!==g?f.findIndex(Xe.bind(null,a[u-2])):p}),r=mn(()=>i.value>-1&&df(t.params,s.value.params)),o=mn(()=>i.value>-1&&i.value===t.matched.length-1&&cl(t.params,s.value.params));function l(a={}){if(ff(a)){const u=e[dn(n.replace)?"replace":"push"](dn(n.to)).catch(bt);return n.viewTransition&&typeof document<"u"&&"startViewTransition"in document&&document.startViewTransition(()=>u),u}return Promise.resolve()}return{route:s,href:mn(()=>s.value.href),isActive:r,isExactActive:o,navigate:l}}function af(n){return n.length===1?n[0]:n}const cf=Oo({name:"RouterLink",compatConfig:{MODE:3},props:{to:{type:[String,Object],required:!0},replace:Boolean,activeClass:String,exactActiveClass:String,custom:Boolean,ariaCurrentValue:{type:String,default:"page"},viewTransition:Boolean},useLink:Hr,setup(n,{slots:e}){const t=as(Hr(n)),{options:s}=Fn(gs),i=mn(()=>({[Fr(n.activeClass,s.linkActiveClass,"router-link-active")]:t.isActive,[Fr(n.exactActiveClass,s.linkExactActiveClass,"router-link-exact-active")]:t.isExactActive}));return()=>{const r=e.default&&af(e.default(t));return n.custom?r:el("a",{"aria-current":t.isExactActive?n.ariaCurrentValue:null,href:t.href,onClick:t.navigate,class:i.value},r)}}}),uf=cf;function ff(n){if(!(n.metaKey||n.altKey||n.ctrlKey||n.shiftKey)&&!n.defaultPrevented&&!(n.button!==void 0&&n.button!==0)){if(n.currentTarget&&n.currentTarget.getAttribute){const e=n.currentTarget.getAttribute("target");if(/\b_blank\b/i.test(e))return}return n.preventDefault&&n.preventDefault(),!0}}function df(n,e){for(const t in e){const s=e[t],i=n[t];if(typeof s=="string"){if(s!==i)return!1}else if(!Vn(i)||i.length!==s.length||s.some((r,o)=>r.valueOf()!==i[o].valueOf()))return!1}return!0}function Br(n){return n?n.aliasOf?n.aliasOf.path:n.path:""}const Fr=(n,e,t)=>n??e??t,hf=Oo({name:"RouterView",inheritAttrs:!1,props:{name:{type:String,default:"default"},route:Object},compatConfig:{MODE:3},setup(n,{attrs:e,slots:t}){const s=Fn(Js),i=mn(()=>n.route||s.value),r=Fn(Cr,0),o=mn(()=>{let u=dn(r);const{matched:c}=i.value;let f;for(;(f=c[u])&&!f.components;)u++;return u}),l=mn(()=>i.value.matched[o.value]);Bt(Cr,mn(()=>o.value+1)),Bt(Bu,l),Bt(Js,i);const a=pe();return Ne(()=>[a.value,l.value,n.name],([u,c,f],[p,g,y])=>{c&&(c.instances[f]=u,g&&g!==c&&u&&u===p&&(c.leaveGuards.size||(c.leaveGuards=g.leaveGuards),c.updateGuards.size||(c.updateGuards=g.updateGuards))),u&&c&&(!g||!Xe(c,g)||!p)&&(c.enterCallbacks[f]||[]).forEach(w=>w(u))},{flush:"post"}),()=>{const u=i.value,c=n.name,f=l.value,p=f&&f.components[c];if(!p)return Ur(t.default,{Component:p,route:u});const g=f.props[c],y=g?g===!0?u.params:typeof g=="function"?g(u):g:null,N=el(p,K({},y,e,{onVnodeUnmounted:M=>{M.component.isUnmounted&&(f.instances[c]=null)},ref:a}));return Ur(t.default,{Component:N,route:u})||N}}});function Ur(n,e){if(!n)return null;const t=n(e);return t.length===1?t[0]:t}const pf=hf;function gf(n){const e=tf(n.routes,n),t=n.parseQuery||ju,s=n.stringifyQuery||Ar,i=n.history,r=ot(),o=ot(),l=ot(),a=la(xe);let u=xe;Je&&n.scrollBehavior&&"scrollRestoration"in history&&(history.scrollRestoration="manual");const c=Os.bind(null,_=>""+_),f=Os.bind(null,vu),p=Os.bind(null,St);function g(_,P){let R,I;return ul(_)?(R=e.getRecordMatcher(_),I=P):I=_,e.addRoute(I,R)}function y(_){const P=e.getRecordMatcher(_);P&&e.removeRoute(P)}function w(){return e.getRoutes().map(_=>_.record)}function N(_){return!!e.getRecordMatcher(_)}function M(_,P){if(P=K({},P||a.value),typeof _=="string"){const $=Es(t,_,P.path),b=e.resolve({path:$.path},P),x=i.createHref($.fullPath);return K($,b,{params:p(b.params),hash:St($.hash),redirectedFrom:void 0,href:x})}let R;if(_.path!=null)R=K({},_,{path:Es(t,_.path,P.path).path});else{const $=K({},_.params);for(const b in $)$[b]==null&&delete $[b];R=K({},_,{params:f($)}),P.params=f(P.params)}const I=e.resolve(R,P),V=_.hash||"";I.params=c(p(I.params));const d=ku(s,K({},_,{hash:bu(V),path:I.path})),h=i.createHref(d);return K({fullPath:d,hash:V,query:s===Ar?Hu(_.query):_.query||{}},I,{redirectedFrom:void 0,href:h})}function E(_){return typeof _=="string"?Es(t,_,a.value.path):K({},_)}function C(_,P){if(u!==_)return nt(un.NAVIGATION_CANCELLED,{from:P,to:_})}function A(_){return Z(_)}function Y(_){return A(K(E(_),{replace:!0}))}function an(_,P){const R=_.matched[_.matched.length-1];if(R&&R.redirect){const{redirect:I}=R;let V=typeof I=="function"?I(_,P):I;return typeof V=="string"&&(V=V.includes("?")||V.includes("#")?V=E(V):{path:V},V.params={}),K({query:_.query,hash:_.hash,params:V.path!=null?{}:_.params},V)}}function Z(_,P){const R=u=M(_),I=a.value,V=_.state,d=_.force,h=_.replace===!0,$=an(R,I);if($)return Z(K(E($),{state:typeof $=="object"?K({},V,$.state):V,force:d,replace:h}),P||R);const b=R;b.redirectedFrom=P;let x;return!d&&Tu(s,I,R)&&(x=nt(un.NAVIGATION_DUPLICATED,{to:b,from:I}),qn(I,I,!0,!1)),(x?Promise.resolve(x):Jn(b,I)).catch(m=>ce(m)?ce(m,un.NAVIGATION_GUARD_REDIRECT)?m:_e(m):J(m,b,I)).then(m=>{if(m){if(ce(m,un.NAVIGATION_GUARD_REDIRECT))return Z(K({replace:h},E(m.to),{state:typeof m.to=="object"?K({},V,m.to.state):V,force:d}),P||b)}else m=ke(b,I,!0,h,V);return be(b,I,m),m})}function Gn(_,P){const R=C(_,P);return R?Promise.reject(R):Promise.resolve()}function me(_){const P=Ue.values().next().value;return P&&typeof P.runWithContext=="function"?P.runWithContext(_):_()}function Jn(_,P){let R;const[I,V,d]=Fu(_,P);R=As(I.reverse(),"beforeRouteLeave",_,P);for(const $ of I)$.leaveGuards.forEach(b=>{R.push(ye(b,_,P))});const h=Gn.bind(null,_,P);return R.push(h),Ln(R).then(()=>{R=[];for(const $ of r.list())R.push(ye($,_,P));return R.push(h),Ln(R)}).then(()=>{R=As(V,"beforeRouteUpdate",_,P);for(const $ of V)$.updateGuards.forEach(b=>{R.push(ye(b,_,P))});return R.push(h),Ln(R)}).then(()=>{R=[];for(const $ of d)if($.beforeEnter)if(Vn($.beforeEnter))for(const b of $.beforeEnter)R.push(ye(b,_,P));else R.push(ye($.beforeEnter,_,P));return R.push(h),Ln(R)}).then(()=>(_.matched.forEach($=>$.enterCallbacks={}),R=As(d,"beforeRouteEnter",_,P,me),R.push(h),Ln(R))).then(()=>{R=[];for(const $ of o.list())R.push(ye($,_,P));return R.push(h),Ln(R)}).catch($=>ce($,un.NAVIGATION_CANCELLED)?$:Promise.reject($))}function be(_,P,R){l.list().forEach(I=>me(()=>I(_,P,R)))}function ke(_,P,R,I,V){const d=C(_,P);if(d)return d;const h=P===xe,$=Je?history.state:{};R&&(I||h?i.replace(_.fullPath,K({scroll:h&&$&&$.scroll},V)):i.push(_.fullPath,V)),a.value=_,qn(_,P,R,h),_e()}let Kn;function tt(){Kn||(Kn=i.listen((_,P,R)=>{if(!Te.listening)return;const I=M(_),V=an(I,Te.currentRoute.value);if(V){Z(K(V,{replace:!0,force:!0}),I).catch(bt);return}u=I;const d=a.value;Je&&Nu(Pr(d.fullPath,R.delta),ps()),Jn(I,d).catch(h=>ce(h,un.NAVIGATION_ABORTED|un.NAVIGATION_CANCELLED)?h:ce(h,un.NAVIGATION_GUARD_REDIRECT)?(Z(K(E(h.to),{force:!0}),I).then($=>{ce($,un.NAVIGATION_ABORTED|un.NAVIGATION_DUPLICATED)&&!R.delta&&R.type===Vs.pop&&i.go(-1,!1)}).catch(bt),Promise.reject()):(R.delta&&i.go(-R.delta,!1),J(h,I,d))).then(h=>{h=h||ke(I,d,!1),h&&(R.delta&&!ce(h,un.NAVIGATION_CANCELLED)?i.go(-R.delta,!1):R.type===Vs.pop&&ce(h,un.NAVIGATION_ABORTED|un.NAVIGATION_DUPLICATED)&&i.go(-1,!1)),be(I,d,h)}).catch(bt)}))}let Be=ot(),$n=ot(),nn;function J(_,P,R){_e(_);const I=$n.list();return I.length?I.forEach(V=>V(_,P,R)):console.error(_),Promise.reject(_)}function le(){return nn&&a.value!==xe?Promise.resolve():new Promise((_,P)=>{Be.add([_,P])})}function _e(_){return nn||(nn=!_,tt(),Be.list().forEach(([P,R])=>_?R(_):P()),Be.reset()),_}function qn(_,P,R,I){const{scrollBehavior:V}=n;if(!Je||!V)return Promise.resolve();const d=!R&&Iu(Pr(_.fullPath,0))||(I||!R)&&history.state&&history.state.scroll||null;return Et().then(()=>V(_,P,d)).then(h=>h&&Cu(h)).catch(h=>J(h,_,P))}const En=_=>i.go(_);let Fe;const Ue=new Set,Te={currentRoute:a,listening:!0,addRoute:g,removeRoute:y,clearRoutes:e.clearRoutes,hasRoute:N,getRoutes:w,resolve:M,options:n,push:A,replace:Y,go:En,back:()=>En(-1),forward:()=>En(1),beforeEach:r.add,beforeResolve:o.add,afterEach:l.add,onError:$n.add,isReady:le,install(_){_.component("RouterLink",uf),_.component("RouterView",pf),_.config.globalProperties.$router=Te,Object.defineProperty(_.config.globalProperties,"$route",{enumerable:!0,get:()=>dn(a)}),Je&&!Fe&&a.value===xe&&(Fe=!0,A(i.location).catch(I=>{}));const P={};for(const I in xe)Object.defineProperty(P,I,{get:()=>a.value[I],enumerable:!0});_.provide(gs,Te),_.provide(gi,_o(P)),_.provide(Js,a);const R=_.unmount;Ue.add(_),_.unmount=function(){Ue.delete(_),Ue.size<1&&(u=xe,Kn&&Kn(),Kn=null,a.value=xe,Fe=!1,nn=!1),R()}}};function Ln(_){return _.reduce((P,R)=>P.then(()=>me(R)),Promise.resolve())}return Te}function $f(){return Fn(gs)}function et(n){return Fn(gi)}const $i=`# 画布
 
-内置函数 | 共 29 个函数。画布模块提供像素级图像创建、绘制、特效处理。
+内置函数 | 共 28 个函数。画布模块提供像素级图像创建、绘制、特效处理。
 
 唯一返回 OOP 句柄的是 \`$创建画布$\`，赋值给变量后通过 \`$变量.方法$\` 调用其余所有画布函数，无需手动传递句柄。
 
@@ -1126,30 +1126,7 @@ msg:$routes.主回调 处理 42$
 $打印 %msg%$
 \`\`\`
 
-> \`$回调$\` 和 \`$主回调$\` 是 NR 实现逻辑分发和控制反转的核心。`,wi=`# 内置函数
-
-NR 语言所有函数在引擎启动时即注册完毕，始终可用，无需任何导入声明。
-
-| 分类 | 章节 | 函数数量 | 说明 |
-| --- | --- | --- | --- |
-| 流程控制 | [流程控制](./flow-callback) | 2 | \`$回调$\`、\`$主回调$\` |
-| 输出 | [输出](./output-print) | 2 | \`$打印$\`、\`$打印返回$\` |
-| 服务器 | [服务器](./server) | 1 | \`$启动服务器$\` |
-| 对象创建 | [对象创建](./object) | 1 | \`$new$\` |
-| 访问 | [访问](./network) | 3 | 快捷 HTTP 请求 |
-| 文件操作 | [文件操作](./file) | 23 | 文件读写、存在判断、列表、删除等 |
-| 画布 | [画布](./canvas) | 29 | 像素级图像绘制 |
-| 字符串 | [字符串](./string) | 26 | 字符串操作 |
-| 数学 | [数学](./math) | 8 | 数学运算 |
-| 访问状态机 | [网络访问](./network) | 12 | HTTP 客户端状态机 |
-| 类型转换 | [类型转换](./type) | 4 | 类型转换 |
-
-## 内置函数
-
-所有函数均为引擎内置，无需 \`#引入\` 即可直接调用。
-
-[← 模块与引入](./modules) [流程控制 →](./flow-callback)
-`,ki=`# 函数
+> \`$回调$\` 和 \`$主回调$\` 是 NR 实现逻辑分发和控制反转的核心。`,wi="# 内置函数\n\nNR 语言所有函数在引擎启动时即注册完毕，始终可用，无需任何导入声明。\n\n| 分类 | 章节 | 函数数量 | 说明 |\n| --- | --- | --- | --- |\n| 流程控制 | [流程控制](./flow-callback) | 2 | `$回调$`、`$主回调$` |\n| 输出 | [输出](./output-print) | 2 | `$打印$`、`$打印返回$` |\n| 服务器 | [服务器](./server) | 3 | `$创建服务器$`、`.静态`、`.启动` |\n| 对象创建 | [对象创建](./object) | 1 | `$new$` |\n| 快捷访问 | [访问](./network) | 3 | `$访问$`、`$访问POST$`、`$访问转发$` |\n| 文件操作 | [文件操作](./file) | 23 | 文件读写、存在判断、列表、删除等 |\n| 画布 | [画布](./canvas) | 28 | 像素级图像绘制 |\n| 字符串 | [字符串](./string) | 26 | 字符串操作 |\n| 数学 | [数学](./math) | 11 | 数学运算 |\n| 访问状态机 | [网络访问](./network) | 12 | HTTP 客户端状态机 |\n| 类型转换 | [类型转换](./type) | 4 | 类型转换 |\n\n## 内置函数\n\n所有函数均为引擎内置，无需 `#引入` 即可直接调用。\n\n[← 模块与引入](./modules) [流程控制 →](./flow-callback)\n",ki=`# 函数
 
 函数是 NR 语言中封装可复用逻辑的基本单元。本章涵盖函数定义语法、参数传递、可变参数、递归限制、初始化函数（\`[f]初始化\`）以及脚本执行入口（\`[f]main\`）。
 
@@ -1334,8 +1311,8 @@ $打印 程序启动$
 | [词条系统](./entries) | 普通词条、内部词条、类内部词条 |
 | [函数](./functions) | 定义语法、命名/可变参数、默认参数值、初始化函数 |
 | [JSON 数据处理](./json) | 内联 JSON、对象/数组 DSL、导航取值写入、数组追加 |
-| [面向对象编程](./oop) | 类定义、实例变量、对象创建与方法调用、自我调用 |
-| [模块与引入](./modules) | 文件/目录引入、跨包调用、热更新 |
+| [面向对象编程](./oop) | 类定义、实例变量、指针池句柄、对象创建与方法调用 |
+| [模块与引入](./modules) | 文件/目录引入、星号引入、跨包调用、热更新 |
 | [内置函数](./flow-output) | 流程控制、输出、服务器、对象创建、字符串、数学、网络、类型、画布、文件操作 |
 
 ## 快速开始
@@ -1711,7 +1688,7 @@ msg:'''
 \`\`\`
 `,Oi=`# 数学
 
-共 8 个函数。提供绝对值、最值、幂运算、求和、取整等基础数学运算。
+共 11 个函数。提供绝对值、最值、幂运算、求和、取整、随机数等基础数学运算。
 
 <a id="math-abs"></a>
 
@@ -1864,6 +1841,7 @@ NR 的模块系统允许将一个 \`.nr\` 文件（或整个目录）作为**独
 #引入=other.nr              ← 文件引入（自动以文件名作为包名）
 #引入=folder/               ← 目录引入（自动以目录名作为包名）
 myPkg:#引入=other.nr        ← 显式指定包名（别名引入）
+#引入*=other.nr             ← 星号引入（注入全部函数/词条到当前作用域）
 \`\`\`
 
 ### 使用引入的包
@@ -1921,12 +1899,28 @@ $plugins.handle$         ← 调用 b.nr 中的函数
 #引入=lib/utils.nr       // 相对路径，从当前文件目录出发
 \`\`\`
 
+### 星号引入 \`#引入*=\`
+
+使用 \`#引入*=路径\` 将包中所有函数、词条和变量**注入到当前作用域**，无需通过 \`$包名.成员$\` 即可直接调用：
+
+\`\`\`
+#引入*=utils.nr
+
+[函数]main
+$工具函数$               ← 直接调用 utils.nr 中的函数，无需 utils. 前缀
+\`\`\`
+
+- 注入的函数会自动关联源包的头部变量，调用时引擎自动注入源包的上下文
+- 适合工具函数库场景，减少重复的包名前缀
+- 注意避免命名冲突：星号引入的函数名会覆盖当前作用域中的同名函数
+
 ### 批量引入
 
 多个路径可用逗号分隔，一次引入多个模块/文件：
 
 \`\`\`
 #引入=a.nr,b.nr,plugins/             // 批量引入文件和目录
+#引入*=utils.nr,helpers.nr           // 批量星号引入
 \`\`\`
 
 ## 热重载行为
@@ -2023,7 +2017,7 @@ NR 提供 HTTP 客户端调用：**快捷函数**（\`$访问$\`、\`$访问POST
 
 | 阶段 | 操作 | 说明 |
 | --- | --- | --- |
-| 1. 创建 | \`$创建访问 url$\` | 初始化请求对象，默认 GET 方法，返回 OOP 对象 |
+| 1. 创建 | \`$创建访问 url$\` | 初始化请求对象，默认 GET 方法，返回 \`0x\` 指针句柄 |
 | 2. 配置方法 | \`$对象.切换GET$\` / \`$对象.切换POST$\` / \`$对象.POST$\` / \`$对象.POST文件$\` | 设置 HTTP 方法和请求体 |
 | 3. 配置选项 | \`$对象.设置头部$\` / \`$对象.设置超时$\` / \`$对象.启用跳转$\` / \`$对象.禁用跳转$\` | 设置头部、超时、重定向策略 |
 | 4. 执行 | \`$对象.发送$\` | 实际发起网络请求（阻塞） |
@@ -2037,9 +2031,9 @@ NR 提供 HTTP 客户端调用：**快捷函数**（\`$访问$\`、\`$访问POST
 
 - **格式**：\`$创建访问 [url]$\`
 - **参数**：目标 URL
-- **返回值**：OOP 请求对象
+- **返回值**：\`0x\` 指针句柄（请求对象）
 
-初始化 HTTP 请求状态机，默认 GET 方法。
+初始化 HTTP 请求状态机，默认 GET 方法。请求对象存储在引擎统一指针池中，通过引用计数管理生命周期。
 
 \`\`\`
 net:$创建访问 https://httpbin.org/post$
@@ -2303,7 +2297,7 @@ $访问转发 https://backend.internal/api$
 <dl>
   <dt>格式</dt><dd><code>$new [类名] [参数...]$</code></dd>
   <dt>参数</dt><dd>类名、可选的初始化参数（可变数量）</dd>
-  <dt>返回值</dt><dd>对象句柄或标识符；构造函数不存在时返回空字符串</dd>
+  <dt>返回值</dt><dd>对象句柄（<code>0x</code> 开头的十六进制指针）；构造函数不存在时返回空字符串</dd>
 </dl>
 
 支持传入任意数量的初始化参数：
@@ -2344,7 +2338,7 @@ $c.加一$
 > \`$new$\` 构造函数查找优先级：类名.new → 类名.初始化。详见[面向对象编程](./oop)。
 
 [← 服务器](./server) [字符串操作 →](./string)
-`,Ci='# 面向对象编程\n\nNR 的 OOP 系统建立在词条引擎之上的上下文隔离与状态持久化机制。本章涵盖类定义、实例变量、对象创建与方法调用、自我调用、构造函数输出以及与传统 OOP 的对比。\n\n<dl>\n  <dt>类</dt>\n  <dd>一组绑定到特定命名空间的方法集合，使用 <code class="nr-sig">[函数:类名]</code> 语法定义。</dd>\n  <dt>实例变量</dt>\n  <dd>以 <code class="nr-sig">.字段</code> 前缀命名的变量，在对象方法调用间自动持久化。</dd>\n  <dt>对象</dt>\n  <dd>通过 <code class="nr-sig">$new ClassName$</code> 创建，每个实例维护独立的变量作用域。</dd>\n</dl>\n\n## 类定义\n\n使用 `[函数:类名]`、`[f:类名]` 或 `[F:类名]` 语法：\n\n```\n[函数:Counter]初始化\n$打印 初始化$\n.count:0\n\n[f:Counter]add num     ← [f:类名] 是 [函数:类名] 的简写\n.count+:%num%\n\n[函数:Counter]get\n当前计数：%.count%\n```\n\n- 内部触发词为 `类名.方法名`\n- 构造函数查找顺序：`类名.new` → `类名.初始化`\n\n### 类生命周期\n\n一个 NR 对象的完整生命周期如下：\n\n1. **创建**：通过 `$new ClassName args$` 创建对象实例，引擎查找并执行构造函数\n2. **初始化**：构造函数中设置初始实例变量（`.field:value`），构造函数返回类名字符串给调用者\n3. **使用**：通过 `$对象名.方法 参数$` 调用方法；每次方法调用前从存储中加载实例变量，执行后自动写回\n4. **消亡**：当对象变量被覆盖或超出作用域时，实例数据随之释放\n\n**存储机制**：实例变量存储在引擎内部的键值存储中，键的格式为 `对象名.字段名`。这意味着不同对象的 `.count` 完全独立。\n\n## 实例变量 `.字段`\n\n以 `.` 开头的变量是**实例变量**，在同一个对象的多次方法调用之间持久化：\n\n```\n[f:Counter]add num\n.count+:%num%           ← .count 跨调用保持\n```\n\n- 方法调用前从主上下文加载（`对象名.字段`），执行后自动写回\n- 不同对象的实例变量相互独立\n\n## 创建对象与调用方法\n\n```\nobj:$new Counter$\nobj:$new Counter 参数$\n\n$obj.add 5$             ← 调用方法\n$obj.get$               ← 无参调用\n```\n\n方法返回值通过 `$...$` 替换到调用处。\n\n## 自我调用 `$.method$`\n\n在类方法内部，使用 `$.方法名` 调用同一对象的其他方法：\n\n```\n[函数:Counter]get\n$.add 1$                ← 等价于 $Counter.add 1$\n当前计数：%.count%\n```\n\n- `$.method$` 通过 `self` 变量自动解析为 `ClassName.method`\n- 只能在类方法内部使用（`self` 变量不为空时生效）\n- 支持传参：`$.method arg1 arg2$`\n\n## 构造函数与输出\n\n```\n[函数:Counter]初始化\n.count:0\na                       ← 裸文本直接打印到终端\n$打印 初始化$            ← $打印$ 输出到终端\n```\n\n- 构造函数中的裸文本直接打印到终端，不走管道输出\n- `$打印$` 和 `$打印返回$` 同样输出到终端\n- 构造函数返回 `类名` 字符串（可赋给变量）\n\n## NR OOP vs 传统 OOP 对比\n\n| 概念 | NR OOP | 传统 OOP（Java/Python） |\n| --- | --- | --- |\n| 类定义 | `[函数:类名]方法名` 分散定义 | `class { }` 集中定义 |\n| 继承 | 不支持类继承 | `extends` / 接口实现 |\n| 实例变量 | `.字段`，引擎自动持久化 | `this.field`，内存中维护 |\n| 构造函数 | `类名.new` 或 `类名.初始化` | `constructor()` / `__init__()` |\n| 方法调用 | `$对象.方法 args$` | `obj.method(args)` |\n| 自我调用 | `$.method$` 语法糖 | `this.method()` |\n| 访问控制 | 无 public/private，全公开 | public/protected/private |\n| 多态 | 不支持 | 虚函数/接口 |\n| 适用场景 | 对话状态、简单实体、计数器 | 通用软件工程 |\n\n> **注意事项**\n> - **无继承**：NR 不支持类继承。如需共享行为，使用[普通函数](./functions)或[模块引入](./modules)替代\n> - **实例变量命名**：`.字段` 命名空间与普通变量独立，`.count` 和 `count` 是两个不同的变量\n> - **构造函数返回值**：构造函数返回的是**类名字符串**（如 `"Counter"`），而非对象引用。真正的"对象标识"是赋值的变量名\n> - **方法中修改实例变量**：在类方法中修改 `.字段` 后，引擎**在执行完毕后自动写回**——不需要显式的 "save" 操作\n> 关于对象创建 `$new$` 的更多用法，参见[对象创建](./object)\n\n[← JSON 数据处理](./json) [模块与引入 →](./modules)\n',Ni=`# $打印$ / $打印返回$ — 输出内容
+`,Ci='# 面向对象编程\n\nNR 的 OOP 系统建立在词条引擎之上的上下文隔离与状态持久化机制。本章涵盖类定义、实例变量、对象创建与方法调用、自我调用、构造函数输出以及与传统 OOP 的对比。\n\n<dl>\n  <dt>类</dt>\n  <dd>一组绑定到特定命名空间的方法集合，使用 <code class="nr-sig">[函数:类名]</code> 语法定义。</dd>\n  <dt>实例变量</dt>\n  <dd>以 <code class="nr-sig">.字段</code> 前缀命名的变量，在对象方法调用间自动持久化。</dd>\n  <dt>对象</dt>\n  <dd>通过 <code class="nr-sig">$new ClassName$</code> 创建，每个实例维护独立的变量作用域。</dd>\n</dl>\n\n## 类定义\n\n使用 `[函数:类名]`、`[f:类名]` 或 `[F:类名]` 语法：\n\n```\n[函数:Counter]初始化\n$打印 初始化$\n.count:0\n\n[f:Counter]add num     ← [f:类名] 是 [函数:类名] 的简写\n.count+:%num%\n\n[函数:Counter]get\n当前计数：%.count%\n```\n\n- 内部触发词为 `类名.方法名`\n- 构造函数查找顺序：`类名.new` → `类名.初始化`\n\n### 类生命周期\n\n一个 NR 对象的完整生命周期如下：\n\n1. **创建**：通过 `$new ClassName args$` 创建对象实例，引擎查找并执行构造函数\n2. **初始化**：构造函数中设置初始实例变量（`.field:value`），构造函数返回类名字符串给调用者\n3. **使用**：通过 `$对象名.方法 参数$` 调用方法；每次方法调用前从存储中加载实例变量，执行后自动写回\n4. **消亡**：当对象变量被覆盖或超出作用域时，实例数据随之释放\n\n**存储机制**：实例变量存储在引擎内部的键值存储中，键的格式为 `对象名.字段名`。这意味着不同对象的 `.count` 完全独立。\n\n## 实例变量 `.字段`\n\n以 `.` 开头的变量是**实例变量**，在同一个对象的多次方法调用之间持久化：\n\n```\n[f:Counter]add num\n.count+:%num%           ← .count 跨调用保持\n```\n\n- 方法调用前从主上下文加载（`对象名.字段`），执行后自动写回\n- 不同对象的实例变量相互独立\n\n## 创建对象与调用方法\n\n```\nobj:$new Counter$\nobj:$new Counter 参数$\n\n$obj.add 5$             ← 调用方法\n$obj.get$               ← 无参调用\n```\n\n方法返回值通过 `$...$` 替换到调用处。\n\n## 自我调用 `$.method$`\n\n在类方法内部，使用 `$.方法名` 调用同一对象的其他方法：\n\n```\n[函数:Counter]get\n$.add 1$                ← 等价于 $Counter.add 1$\n当前计数：%.count%\n```\n\n- `$.method$` 通过 `self` 变量自动解析为 `ClassName.method`\n- 只能在类方法内部使用（`self` 变量不为空时生效）\n- 支持传参：`$.method arg1 arg2$`\n\n## 实例句柄\n\n`$new$` 返回的是一个以 `0x` 开头的十六进制指针句柄（如 `0x1a2b3c4d`），存储在引擎的统一指针池中。每个实例通过引用计数管理生命周期——赋值给变量时引用计数加一，变量被覆盖或超出作用域时引用计数减一，归零时自动释放。\n\n```\nc:$new Counter$\n$打印 %c%$        # → 0x1a2b3c4d\n```\n\n句柄对用户透明，无需直接操作——只要持有句柄的变量未丢失，即可通过 `$变量.方法$` 正常调用。\n\n## 构造函数与输出\n\n```\n[函数:Counter]初始化\n.count:0\na                       ← 裸文本直接打印到终端\n$打印 初始化$            ← $打印$ 输出到终端\n```\n\n- 构造函数中的裸文本直接打印到终端，不走管道输出\n- `$打印$` 和 `$打印返回$` 同样输出到终端\n- 构造函数返回 `类名` 字符串（可赋给变量）\n\n## NR OOP vs 传统 OOP 对比\n\n| 概念 | NR OOP | 传统 OOP（Java/Python） |\n| --- | --- | --- |\n| 类定义 | `[函数:类名]方法名` 分散定义 | `class { }` 集中定义 |\n| 继承 | 不支持类继承 | `extends` / 接口实现 |\n| 实例变量 | `.字段`，引擎自动持久化 | `this.field`，内存中维护 |\n| 构造函数 | `类名.new` 或 `类名.初始化` | `constructor()` / `__init__()` |\n| 方法调用 | `$对象.方法 args$` | `obj.method(args)` |\n| 自我调用 | `$.method$` 语法糖 | `this.method()` |\n| 访问控制 | 无 public/private，全公开 | public/protected/private |\n| 多态 | 不支持 | 虚函数/接口 |\n| 适用场景 | 对话状态、简单实体、计数器 | 通用软件工程 |\n\n> **注意事项**\n> - **无继承**：NR 不支持类继承。如需共享行为，使用[普通函数](./functions)或[模块引入](./modules)替代\n> - **实例变量命名**：`.字段` 命名空间与普通变量独立，`.count` 和 `count` 是两个不同的变量\n> - **构造函数返回值**：构造函数返回的是**类名字符串**（如 `"Counter"`），而非对象引用。真正的"对象标识"是赋值的变量名\n> - **方法中修改实例变量**：在类方法中修改 `.字段` 后，引擎**在执行完毕后自动写回**——不需要显式的 "save" 操作\n> 关于对象创建 `$new$` 的更多用法，参见[对象创建](./object)\n\n[← JSON 数据处理](./json) [模块与引入 →](./modules)\n',Ni=`# $打印$ / $打印返回$ — 输出内容
 
 内置函数 | 共 2 个（\`$打印$\`、\`$打印返回$\`）。两者都向结果流追加内容，区别在于是否同时产生表达式返回值。
 
@@ -2392,7 +2386,7 @@ result:$调用 get_name$     ; result 获得函数返回值
 ## OOP 风格
 
 \`\`\`
-$s:创建服务器$                  # 创建服务器对象，返回句柄 服务器@N
+$s:创建服务器$                  # 创建服务器对象，返回 0x 指针句柄
 $s.静态 本地目录 网络路径$       # 配置静态文件服务（网络路径可留空=根路径）
 $s.启动 端口 处理函数$           # 启动服务器开始监听
 \`\`\`
@@ -2402,14 +2396,14 @@ $s.启动 端口 处理函数$           # 启动服务器开始监听
 <dl>
   <dt>格式</dt><dd><code>$var:创建服务器$</code></dd>
   <dt>参数</dt><dd>无</dd>
-  <dt>返回值</dt><dd>服务器实例句柄（如 <code>服务器@0</code>），存入指定变量</dd>
+  <dt>返回值</dt><dd>服务器实例句柄（<code>0x</code> 开头十六进制指针），存入指定变量</dd>
 </dl>
 
-创建一个服务器 OOP 实例，默认端口 8080，未配置静态目录和处理函数。
+创建一个服务器 OOP 实例，默认端口 8080，未配置静态目录和处理函数。实例存储在引擎统一的指针池中，通过引用计数管理生命周期。
 
 \`\`\`
 $s:创建服务器$
-$打印 服务器句柄：%s%$     # → 服务器句柄：服务器@0
+$打印 服务器句柄：%s%$     # → 服务器句柄：0x1a2b3c4d
 \`\`\`
 
 ### \`.静态\` — 配置静态文件目录
