@@ -781,23 +781,26 @@ fn main_callback_fn(ctx: &mut DicContext, _args: &[String], content: &str) -> Op
     }
 }
 
+// ===== 打印 / 打印返回 — 输出到输出管道 =====
+
 fn print_core(ctx: &mut DicContext, args: &[String]) -> String {
     let value = args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
     let texted = ctx.val.text(&value);
-    let result = crate::count::run_count_text(&ctx.val, &texted);
-    ctx.output.add(&format!("{}\n", crate::analyzer::unescape_newline(&result)));
-    result
+    crate::count::run_count_text(&ctx.val, &texted)
 }
 
-/// $打印 内容$ — 直接输出到标准输出，不返回（支持 %var% 和 [expr]）
+/// $打印 内容$ — 输出到管道，不返回值
 fn print_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    print_core(ctx, args);
+    let result = print_core(ctx, args);
+    ctx.output.add(&format!("{}\n", crate::analyzer::unescape_newline(&result)));
     None
 }
 
-/// $打印返回 内容$ — 输出并返回该值（支持 %var% 和 [expr]）
+/// $打印返回 内容$ — 输出到管道并返回值
 fn print_return_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    Some(print_core(ctx, args))
+    let result = print_core(ctx, args);
+    ctx.output.add(&format!("{}\n", crate::analyzer::unescape_newline(&result)));
+    Some(result)
 }
 
 // ===== 创建服务器 — 创建服务器 OOP 实例，返回 *指针 =====

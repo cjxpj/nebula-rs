@@ -1519,27 +1519,6 @@ fn exec_func_call_debug(
         if !var_name.is_empty() && !func_name.is_empty() && !func_name.contains(':') {
             // 先查内置函数
             if let Some(&builtin_fn) = ctx.shared.builtins.get(func_name) {
-                // 打印 / 打印返回 必须先拦截，不能调 builtin_fn，否则 println! 污染 DAP
-                if func_name == "打印" {
-                    let value = args.join(" ");
-                    let texted = ctx.val.text(&value);
-                    let result = crate::count::run_count_text(&ctx.val, &texted);
-                    let _ = event_tx.send(DebugEvent::Output(
-                        format!("{}\n", crate::analyzer::unescape_newline(&result)),
-                    ));
-                    return ExecResult::Continue;
-                }
-                if func_name == "打印返回" {
-                    let value = args.join(" ");
-                    let texted = ctx.val.text(&value);
-                    let result = crate::count::run_count_text(&ctx.val, &texted);
-                    let _ = event_tx.send(DebugEvent::Output(
-                        format!("{}\n", crate::analyzer::unescape_newline(&result)),
-                    ));
-                    ctx.val.p.set_string(var_name, result.clone());
-                    ctx.val.set_global(var_name, result);
-                    return ExecResult::Continue;
-                }
                 let all_args: Vec<String> = {
                     let mut a = vec![func_name.to_string()];
                     a.extend(args.iter().cloned());
@@ -1634,30 +1613,9 @@ fn exec_func_call_debug(
         name
     };
 
-    // 先查内置函数（打印 / 打印返回 需特殊处理避免 println! 污染 DAP 协议通道）
+    // 先查内置函数
     if let Some(&builtin_fn) = ctx.shared.builtins.get(name) {
-        if name == "打印" {
-            // $打印 内容$ — 输出到调试控制台，不返回值
-            let value = args.join(" ");
-            let texted = ctx.val.text(&value);
-            let result = crate::count::run_count_text(&ctx.val, &texted);
-            let _ = event_tx.send(DebugEvent::Output(
-                format!("{}\n", crate::analyzer::unescape_newline(&result)),
-            ));
-            return ExecResult::Continue;
-        }
-        if name == "打印返回" {
-            // $打印返回 内容$ — 输出到调试控制台并返回值
-            let value = args.join(" ");
-            let texted = ctx.val.text(&value);
-            let result = crate::count::run_count_text(&ctx.val, &texted);
-            let _ = event_tx.send(DebugEvent::Output(
-                format!("{}\n", crate::analyzer::unescape_newline(&result)),
-            ));
-            ctx.output.add_string(result);
-            return ExecResult::Continue;
-        }
-        // 其他内置函数：调用并收集返回值
+        // 调用内置函数并收集返回值
         let all_args: Vec<String> = {
             let mut a = vec![name.to_string()];
             a.extend(args.iter().cloned());
