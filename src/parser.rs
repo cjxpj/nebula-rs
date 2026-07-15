@@ -307,50 +307,16 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
                         func_text.extend(z.local_static.clone());
                         dic_text.extend(z.dic.clone());
                         // 同时保留命名空间访问（如 $test.函数$）
-                        let auto_name = if z.stdlib_module.is_some() {
-                            z.stdlib_module.as_deref().unwrap_or("unknown").to_string()
-                        } else {
-                            let path_ref = std::path::Path::new(single_path);
-                            if single_path.ends_with(".nr") {
-                                path_ref.file_stem()
-                                    .and_then(|s| s.to_str())
-                                    .unwrap_or(single_path)
-                                    .to_string()
-                            } else {
-                                path_ref.file_name()
-                                    .and_then(|s| s.to_str())
-                                    .unwrap_or(single_path)
-                                    .to_string()
-                            }
-                        };
+                        let auto_name = crate::interpreter::resolve_pkg_key(single_path);
                         if !packages.contains_key(&auto_name) {
                             packages.insert(auto_name, z);
                         }
                     } else {
-                        let is_stdlib = z.stdlib_module.is_some();
                         if !pkg_name.is_empty() {
                             let pkg_key = pkg_name.strip_prefix('.').unwrap_or(&pkg_name).to_string();
                             packages.insert(pkg_key, z);
-                        } else if is_stdlib {
-                            let module = z.stdlib_module.as_deref().unwrap_or("unknown");
-                            packages.insert(module.to_string(), z);
                         } else {
-                            let auto_name = if is_stdlib {
-                                z.stdlib_module.as_deref().unwrap_or("unknown").to_string()
-                            } else {
-                                let path_ref = std::path::Path::new(single_path);
-                                if single_path.ends_with(".nr") {
-                                    path_ref.file_stem()
-                                        .and_then(|s| s.to_str())
-                                        .unwrap_or(single_path)
-                                        .to_string()
-                                } else {
-                                    path_ref.file_name()
-                                        .and_then(|s| s.to_str())
-                                        .unwrap_or(single_path)
-                                        .to_string()
-                                }
-                            };
+                            let auto_name = crate::interpreter::resolve_pkg_key(single_path);
                             if packages.contains_key(&auto_name) {
                                 // 同名包已存在 → 跳过
                             } else {
