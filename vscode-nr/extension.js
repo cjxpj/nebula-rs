@@ -250,6 +250,40 @@ function activate(context) {
         }
     });
 
+    // ── 调试适配器工厂 ──
+    const debugFactory = vscode.debug.registerDebugAdapterDescriptorFactory('nr-debug', {
+        async createDebugAdapterDescriptor(session) {
+            const config = session.configuration;
+            // 解析 ${file}, ${workspaceFolder} 等变量
+            const program = resolveDebugConfigVariable(config.program, session);
+            const rawNebulaPath = config.nebulaPath;
+            const nebulaPath = rawNebulaPath
+                ? resolveDebugConfigVariable(rawNebulaPath, session)
+                : findNebula();
+
+            // 直接启动 nebula --debug，不传文件（文件通过 launch 请求的 program 字段传入）
+            // 如果 config 中指定了 program，也作为命令行参数传入以支持预加载
+            const args = ['--debug'];
+            if (program && fs.existsSync(program)) {
+                args.push(program);
+            }
+
+            console.log(`[nr-debug] Starting: ${nebulaPath} ${args.join(' ')}`);
+            console.log(`[nr-debug] Program: ${program}`);
+
+            const options = {};
+            // 设置 cwd 为 workspace 根目录
+            const workspaceFolder = session.workspaceFolder
+                || (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0]);
+            if (workspaceFolder) {
+                options.cwd = workspaceFolder.uri.fsPath;
+            }
+
+            return new vscode.DebugAdapterExecutable(nebulaPath, args, options);
+        }
+    });
+    context.subscriptions.push(debugFactory);
+
     // ── 补全 Provider ──
     const provider = vscode.languages.registerCompletionItemProvider('nr', {
         provideCompletionItems(document, position) {
@@ -270,6 +304,59 @@ function activate(context) {
     );
 
     context.subscriptions.push(provider);
+}
+
+// ============ 调试支持函数 ============
+
+/** 查找 nebula 可执行文件 */
+function findNebula() {
+    // 环境变量
+    if (process.env.NEBULA_PATH) {
+        return process.env.NEBULA_PATH;
+    }
+
+    // 同目录
+    const exeName = process.platform === 'win32' ? 'nebula.exe' : 'nebula';
+    const localPath = path.join(__dirname, exeName);
+    if (fs.existsSync(localPath)) {
+        return localPath;
+    }
+
+    // PATH
+    return 'nebula';
+}
+
+/** 解析调试配置中的变量（如 ${file}, ${workspaceFolder} 等） */
+function resolveDebugConfigVariable(value, session) {
+    if (!value) {
+        // 默认使用当前活动编辑器的文件
+        const editor = vscode.window.activeTextEditor;
+        if (editor && editor.document.languageId === 'nr') {
+            return editor.document.uri.fsPath;
+        }
+        return '';
+    }
+
+    // 使用 session 的 workspaceFolder
+    const workspaceFolder = session.workspaceFolder
+        || (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0]);
+
+    if (workspaceFolder) {
+        value = value.replace(/\$\{workspaceFolder\}/g, workspaceFolder.uri.fsPath);
+    }
+
+    // ${file} → 当前活动文件
+    const editor = vscode.window.activeTextEditor;
+    if (editor) {
+        value = value.replace(/\$\{file\}/g, editor.document.uri.fsPath);
+    }
+
+    // 如果结果是相对路径，基于 workspace 根目录解析为绝对路径
+    if (value && !path.isAbsolute(value) && workspaceFolder) {
+        value = path.resolve(workspaceFolder.uri.fsPath, value);
+    }
+
+    return value;
 }
 
 // ============ 补全项生成 ============
