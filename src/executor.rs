@@ -1139,21 +1139,21 @@ fn exec_stmts_impl_debug(
         // 计算行号
         let line = ctx.sys.line_offset + (idx as usize);
 
-        // 收集变量快照（过滤内部变量，先收集全局变量 g 再覆盖本地变量 p）
-        let mut vars: HashMap<String, String> = ctx.val.g.get_all()
-            .iter()
-            .filter(|(k, _)| !is_internal_variable(k))
-            .map(|(k, v)| (k.clone(), v.display()))
+        // 按链分层收集变量，过滤内部变量
+        let scope_chain: Vec<(String, HashMap<String, String>)> = ctx.val.p.collect_chain_vars()
+            .into_iter()
+            .map(|(name, map)| {
+                let filtered: HashMap<String, String> = map.into_iter()
+                    .filter(|(k, _)| !is_internal_variable(k))
+                    .map(|(k, v)| (k, v.display()))
+                    .collect();
+                (name, filtered)
+            })
             .collect();
-        for (k, v) in ctx.val.p.get_all().iter() {
-            if !is_internal_variable(k) {
-                vars.insert(k.clone(), v.display());
-            }
-        }
 
         // 调试检查
         if !dap::check_debug_before_exec(
-            shared, event_tx, cmd_rx, &file, line, depth, &vars, &call_stack,
+            shared, event_tx, cmd_rx, &file, line, depth, &scope_chain, &call_stack,
         ) {
             return ExecResult::Stop;
         }
@@ -1527,7 +1527,7 @@ fn exec_func_call_debug(
                         format!("{}\n", crate::analyzer::unescape_newline(&result)),
                     ));
                     ctx.val.p.set_string(var_name, result.clone());
-                    ctx.val.set_g_string(var_name, result);
+                    ctx.val.set_global(var_name, result);
                     return ExecResult::Continue;
                 }
                 let all_args: Vec<String> = {
@@ -1548,7 +1548,7 @@ fn exec_func_call_debug(
                 let out = builtin_fn(ctx, &all_args, &content);
                 if let Some(out) = out {
                     ctx.val.p.set_string(var_name, out.clone());
-                    ctx.val.set_g_string(var_name, out);
+                    ctx.val.set_global(var_name, out);
                 }
                 return ExecResult::Continue;
             }
@@ -1593,7 +1593,7 @@ fn exec_func_call_debug(
                 let out = sub_ctx.output.get();
                 if !out.is_empty() {
                     ctx.val.p.set_string(var_name, out.clone());
-                    ctx.val.set_g_string(var_name, out);
+                    ctx.val.set_global(var_name, out);
                 }
                 return exec_result;
             }
@@ -2242,7 +2242,7 @@ fn exec_assign(ctx: &mut DicContext, target: &str, op: &AssignOp, expr: &Expr) {
         let clean_target = target.strip_prefix('@').unwrap_or(target);
         if let Some((json_key, sub_keys)) = crate::value::parse_bracket_path(clean_target) {
             let json_key = count::run_count_text(&ctx.val, json_key);
-            let json_str = crate::value::Val::lookup_display(&json_key, ctx.val.p.get_all(), Some(ctx.val.g.get_all()));
+            let json_str = crate::value::Scope::lookup_display(&json_key, &ctx.val.p, Some(ctx.val.g.get_all()));
             if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&json_str) {
                 let eval_result = eval_expr(ctx, expr).unwrap_or(Value::Null);
                 let v_set_data = eval_result.display();
@@ -2264,7 +2264,7 @@ fn exec_assign(ctx: &mut DicContext, target: &str, op: &AssignOp, expr: &Expr) {
                 };
                 json_set_value_mut(&mut val, &sub_keys, &json_val);
                 if let Ok(s) = serde_json::to_string(&val) {
-                    let storage_key = crate::value::Val::resolve_ptr_key(&json_key, ctx.val.p.get_all(), Some(ctx.val.g.get_all()));
+                    let storage_key = crate::value::Scope::resolve_ptr_key(&json_key, &ctx.val.p, Some(ctx.val.g.get_all()));
                     ctx.val.p.set_string(&storage_key, s);
                 }
             } else if looks_like_json(&json_str) {
@@ -2758,7 +2758,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                     let old = ctx.val.p.get_cloned(var_name);
                     crate::functions::track_ptr_assign(&old, &out);
                     ctx.val.p.set_string(var_name, out.clone());
-                    ctx.val.set_g_string(var_name, out);
+                    ctx.val.set_global(var_name, out);
                 }
                 return;
             }
@@ -2780,7 +2780,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                     let old = ctx.val.p.get_cloned(var_name);
                     crate::functions::track_ptr_assign(&old, &result);
                     ctx.val.p.set_string(var_name, result.clone());
-                    ctx.val.set_g_string(var_name, result);
+                    ctx.val.set_global(var_name, result);
                 }
             }
             return;
@@ -3246,19 +3246,19 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
             let resolved_obj = ctx.val.text(&format!("%{}%", class_name));
             let class_key = if resolved_obj.contains('%') { class_name.to_string() } else { resolved_obj };
             for prefix in [&format!("{}.", class_name), &format!("{}.", class_key)] {
-                for (key, val) in ctx.val.p.obj.iter() {
+                for (key, val) in ctx.val.p.iter_local() {
                     if let Some(field) = key.strip_prefix(prefix.as_str()) {
                         let dot_key = format!(".{}", field);
-                        if !sub_ctx.val.p.obj.contains_key(&dot_key) {
+                        if !sub_ctx.val.p.contains_key_local(&dot_key) {
                             sub_ctx.val.p.set_string(&dot_key, val.display());
                         }
                     }
                 }
             }
             // 同时复制当前上下文中已有的 .field（OOP 子上下文已加载的）
-            for (key, val) in ctx.val.p.obj.iter() {
+            for (key, val) in ctx.val.p.iter_local() {
                 if key.starts_with('.')
-                    && !sub_ctx.val.p.obj.contains_key(key) {
+                    && !sub_ctx.val.p.contains_key_local(key) {
                     sub_ctx.val.p.set_string(key, val.display());
                 }
             }
@@ -3348,19 +3348,19 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                 if !val.is_empty() {
                     let class_prefix = format!("{}.", val);
                     let param_prefix = format!("{}.", &param_names[i]);
-                    for (key, v) in ctx.val.p.obj.iter() {
+                    for (key, v) in ctx.val.p.iter_local() {
                         if let Some(field) = key.strip_prefix(&class_prefix) {
                             // 同时以参数名和类名为前缀存入，确保 OOP 调度能找到
                             let dot_key = format!(".{}", field);
-                            if !sub_ctx.val.p.obj.contains_key(&dot_key) {
+                            if !sub_ctx.val.p.contains_key_local(&dot_key) {
                                 sub_ctx.val.p.set_string(&dot_key, v.display());
                             }
                             let param_key = format!("{}{}", param_prefix, field);
-                            if !sub_ctx.val.p.obj.contains_key(&param_key) {
+                            if !sub_ctx.val.p.contains_key_local(&param_key) {
                                 sub_ctx.val.p.set_string(&param_key, v.display());
                             }
                             let class_key = format!("{}{}", class_prefix, field);
-                            if !sub_ctx.val.p.obj.contains_key(&class_key) {
+                            if !sub_ctx.val.p.contains_key_local(&class_key) {
                                 sub_ctx.val.p.set_string(&class_key, v.display());
                             }
                         }
@@ -3382,7 +3382,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
             crate::functions::writeback_ptr_vars(ctx, &sub_ctx, &raw_args, &param_names, 0);
             // 实例变量持久化：同步子上下文 .field 到当前上下文
             // 上层 OOP 调用会负责 ClassName.field 最终持久化
-            for (key, val) in sub_ctx.val.p.obj.iter() {
+            for (key, val) in sub_ctx.val.p.iter_local() {
                 if key.starts_with('.') {
                     ctx.val.p.set_string(key, val.display());
                 }

@@ -1,80 +1,98 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use crate::ast::Value;
 
-/// 词库变量存储
-#[derive(Debug, Clone)]
-pub struct Val {
+/* ===================== Scope: 链式作用域 ===================== */
+
+/// 变量作用域（Python 风格链式查找）
+/// 
+/// 查找沿 enclosing 链回溯：当前 obj → enclosing.obj → enclosing.enclosing.obj → ...
+/// 写入始终写入当前 obj（Python 语义：赋值只在本地作用域）
+#[derive(Clone)]
+pub struct Scope {
     pub(crate) obj: HashMap<String, Value>,
-    objlock: HashMap<String, bool>,
+    enclosing: Option<Arc<Scope>>,
+}
+
+/// 自定义 Debug：不递归展开链，仅展示当前帧变量 + 链深度
+impl fmt::Debug for Scope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let depth = self.chain_depth();
+        f.debug_struct("Scope")
+            .field("vars", &self.obj.len())
+            .field("chain_depth", &depth)
+            .finish()
+    }
 }
 
 #[allow(dead_code)]
-impl Val {
+impl Scope {
     pub fn new() -> Self {
-        Val {
+        Scope {
             obj: HashMap::new(),
-            objlock: HashMap::new(),
+            enclosing: None,
         }
     }
 
+    pub fn with_enclosing(enclosing: Arc<Scope>) -> Self {
+        Scope {
+            obj: HashMap::new(),
+            enclosing: Some(enclosing),
+        }
+    }
+
+    /// 链深度（调试用）
+    fn chain_depth(&self) -> usize {
+        let mut depth = 1;
+        let mut cur = self;
+        while let Some(p) = &cur.enclosing {
+            depth += 1;
+            cur = p;
+        }
+        depth
+    }
+
+    // ─── 链式查找（Python LEGB 风格） ───
+
+    /// 本作用域查找（不回溯链）
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.obj.get(key)
     }
 
-    /// 获取值并转为 f64
-    pub fn get_f64(&self, key: &str) -> f64 {
-        self.obj.get(key).map(|v| v.as_f64()).unwrap_or(0.0)
+    /// 链式查找：当前 → enclosing → ...
+    pub fn resolve(&self, key: &str) -> Option<&Value> {
+        if let Some(v) = self.obj.get(key) {
+            return Some(v);
+        }
+        self.enclosing.as_ref().and_then(|e| e.resolve(key))
     }
 
-    /// 获取值并转为 i64
-    pub fn get_i64(&self, key: &str) -> i64 {
-        self.obj.get(key).map(|v| v.as_i64()).unwrap_or(0)
-    }
-
-    /// 获取值并显示为 String
-    pub fn get_display(&self, key: &str) -> String {
-        self.obj.get(key).map(|v| v.display()).unwrap_or_default()
-    }
-
+    /// 链式查找并转为显示字符串
     pub fn get_cloned(&self, key: &str) -> String {
-        self.get_display(key)
+        self.resolve(key).map(|v| v.display()).unwrap_or_default()
     }
 
-    /// 零分配：比较变量值是否等于指定字符串
+    /// 链式查找：比较变量值是否等于指定字符串
     pub fn eq_str(&self, key: &str, other: &str) -> bool {
-        self.obj.get(key).map(|v| match v {
+        self.resolve(key).map(|v| match v {
             Value::Str(s) => s == other,
             Value::Int(i) => i.to_string() == other,
             _ => false,
         }).unwrap_or(other.is_empty())
     }
 
-    /// 零分配：变量值是否为空（无 key / Null / 空串 / "0" → true）
-    pub fn is_empty_val(&self, key: &str) -> bool {
-        self.obj.get(key).map(|v| match v {
-            Value::Str(s) => s.is_empty(),
-            Value::Null => true,
-            Value::Int(0) => true,
-            _ => false,
-        }).unwrap_or(true)
+    // ─── 本地查找（不回溯链） ───
+
+    pub fn contains_key_local(&self, key: &str) -> bool {
+        self.obj.contains_key(key)
     }
 
-    pub fn set(&mut self, key: &str, value: &str) {
-        self.obj.insert(key.to_string(), Value::Str(value.to_string()));
+    pub fn iter_local(&self) -> impl Iterator<Item = (&String, &Value)> {
+        self.obj.iter()
     }
 
-    pub fn set_int(&mut self, key: &str, value: i64) {
-        self.obj.insert(key.to_string(), Value::Int(value));
-    }
-
-    pub fn set_float(&mut self, key: &str, value: f64) {
-        self.obj.insert(key.to_string(), Value::Float(value));
-    }
-
-    pub fn set_str(&mut self, key: &str, value: String) {
-        self.obj.insert(key.to_string(), Value::Str(value));
-    }
+    // ─── 写入 ───
 
     pub fn set_funcptr(&mut self, key: &str, func_name: String) {
         self.obj.insert(key.to_string(), Value::FuncPtr(func_name));
@@ -85,7 +103,6 @@ impl Val {
     }
 
     pub fn set_string(&mut self, key: &str, value: String) {
-        // 自动推断类型：数字 → Int，浮点 → Float，其余 → Str
         if let Ok(i) = value.parse::<i64>() {
             self.obj.insert(key.to_string(), Value::Int(i));
         } else if let Ok(f) = value.parse::<f64>() {
@@ -93,14 +110,6 @@ impl Val {
         } else {
             self.obj.insert(key.to_string(), Value::Str(value));
         }
-    }
-
-    pub fn is_locked(&self, key: &str) -> bool {
-        self.objlock.get(key).copied().unwrap_or(false)
-    }
-
-    pub fn lock(&mut self, key: &str) {
-        self.objlock.insert(key.to_string(), true);
     }
 
     pub fn remove(&mut self, key: &str) {
@@ -111,32 +120,47 @@ impl Val {
         &self.obj
     }
 
-    pub fn reset(&mut self, data: &HashMap<String, Value>) -> &mut Self {
-        self.obj = data.clone();
-        self
+    /// 收集链上所有变量，返回 [(作用域名, 变量表)]，从当前到根
+    /// 最底层的 root（最后一级）标记为 "全局变量"
+    pub fn collect_chain_vars(&self) -> Vec<(String, HashMap<String, Value>)> {
+        let mut chain = Vec::new();
+        let mut cur = Some(self);
+        while let Some(scope) = cur {
+            let name = if scope.enclosing.is_none() {
+                "全局变量".to_string()
+            } else if chain.is_empty() {
+                "局部变量".to_string()
+            } else {
+                format!("上级作用域 #{}", chain.len())
+            };
+            chain.push((name, scope.obj.clone()));
+            cur = scope.enclosing.as_deref();
+        }
+        chain
     }
 
+    // ─── 文本替换（%变量名%） ───
+
     /// 核心变量替换：处理 %变量名% 格式
+    /// 仅从本作用域查找（不回溯链）
     pub fn text(&self, input: &str) -> String {
         if input.is_empty() {
             return String::new();
         }
         if !input.contains('%') {
-            // 快速路径：不含 %，但可能含 @var[slice] 快捷截取
             if input.contains('@') {
-                return resolve_at_slices(input, &self.obj, None);
+                return resolve_at_slices(input, self, None);
             }
             return input.to_string();
         }
-        let result = Self::text_with_vals(input, &self.obj, None);
-        // text_with_vals 中未被 %...% 包裹的 @var[slice] 仍需处理
+        let result = Self::text_with_vals(input, self, None);
         if result.contains('@') {
-            return resolve_at_slices(&result, &self.obj, None);
+            return resolve_at_slices(&result, self, None);
         }
         result
     }
 
-    /// 解析参数默认值：位置参数默认值尝试作为变量引用（%var%）解析
+    /// 解析参数默认值
     pub fn resolve_default(&self, default_val: &str, has_named_params: bool) -> String {
         if has_named_params {
             return default_val.to_string();
@@ -149,8 +173,8 @@ impl Val {
         }
     }
 
-    /// 带全局变量的文本替换
-    pub fn text_with_vals(input: &str, local: &HashMap<String, Value>, global: Option<&HashMap<String, Value>>) -> String {
+    /// 带全局变量加链式查找的文本替换
+    pub fn text_with_vals(input: &str, scope: &Scope, global: Option<&HashMap<String, Value>>) -> String {
         if !input.contains('%') {
             return input.to_string();
         }
@@ -179,7 +203,7 @@ impl Val {
                             if inner.is_empty() {
                                 result.push_str("%%");
                             } else {
-                                result.push_str(&Self::resolve_var(inner, local, global));
+                                result.push_str(&Self::resolve_var(inner, scope, global));
                             }
                             rest = &rest[close_pos + 1..];
                         }
@@ -188,14 +212,13 @@ impl Val {
             }
         }
 
-        // 处理未被 %...% 包裹的 @var[slice] 快捷截取
         if result.contains('@') {
-            return resolve_at_slices(&result, local, global);
+            return resolve_at_slices(&result, scope, global);
         }
         result
     }
 
-    fn resolve_var(inner: &str, local: &HashMap<String, Value>, global: Option<&HashMap<String, Value>>) -> String {
+    fn resolve_var(inner: &str, scope: &Scope, global: Option<&HashMap<String, Value>>) -> String {
         match inner {
             "空格" => return " ".to_string(),
             "换行" => return "\n".to_string(),
@@ -204,7 +227,7 @@ impl Val {
 
         // %!key% 布尔取反
         if let Some(key) = inner.strip_prefix('!') {
-            let val = Self::lookup_display(key, local, global);
+            let val = Self::lookup_display(key, scope, global);
             return match val.as_str() {
                 "" | "0" | "false" | "False" | "FALSE" | "null" | "NULL" => "1".to_string(),
                 _ => "0".to_string(),
@@ -213,12 +236,12 @@ impl Val {
 
         // %TYPE@key% 类型查询
         if let Some(key) = inner.strip_prefix("TYPE@") {
-            return Self::lookup_type(key, local, global);
+            return Self::lookup_type(key, scope, global);
         }
 
         // %B64@key% base64 解码
         if let Some(key) = inner.strip_prefix("B64@") {
-            let val = Self::lookup_display(key, local, global);
+            let val = Self::lookup_display(key, scope, global);
             if val.is_empty() {
                 return format!("%{}%", inner);
             }
@@ -232,12 +255,12 @@ impl Val {
 
         // %URL编码@key%
         if let Some(key) = inner.strip_prefix("URL编码@") {
-            let val = Self::lookup_display(key, local, global);
+            let val = Self::lookup_display(key, scope, global);
             if val.is_empty() { return format!("%{}%", inner); }
             return urlencoding_encode(&val);
         }
 
-        // %func@key% 获取函数指针（返回函数名作为引用）
+        // %func@key% 获取函数指针
         if let Some(key) = inner.strip_prefix("func@") {
             return key.to_string();
         }
@@ -246,13 +269,13 @@ impl Val {
         if let Some(key) = inner.strip_prefix("len@")
             .or_else(|| inner.strip_prefix("长度@"))
         {
-            let val = Self::lookup_display(key, local, global);
+            let val = Self::lookup_display(key, scope, global);
             return val.chars().count().to_string();
         }
 
         // %?key% 可选变量
         if let Some(key) = inner.strip_prefix('?') {
-            let val = Self::lookup_display(key, local, global);
+            let val = Self::lookup_display(key, scope, global);
             if val.starts_with('%') && val.ends_with('%') {
                 return String::new();
             }
@@ -281,20 +304,16 @@ impl Val {
             }
         }
 
-        // %@key[slice]% 文本切片 (符号截取) —— 方括号内含 ':' 即视为切片
+        // %@key[slice]% 文本切片
         if inner.starts_with('@') && inner.contains('[') {
             if let Some((var_name, slice)) = parse_text_slice(&inner[1..]) {
-                let val = Self::lookup_display(var_name, local, global);
+                let val = Self::lookup_display(var_name, scope, global);
                 if !val.is_empty() && !val.starts_with('%') {
                     return apply_text_slice(&val, slice);
                 }
                 return String::new();
             } else if let Some((json_key, sub_keys)) = parse_bracket_path(&inner[1..]) {
-                // %@key[path]% JSON 路径导航
-                let json_str = local.get(json_key)
-                    .or_else(|| global.and_then(|g| g.get(json_key)))
-                    .map(|v| v.display())
-                    .unwrap_or_default();
+                let json_str = Self::lookup_display(json_key, scope, global);
                 if !json_str.is_empty() {
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
                         if let Some(result) = navigate_json(&val, &sub_keys) {
@@ -310,11 +329,12 @@ impl Val {
             }
         }
 
-        Self::lookup_display(inner, local, global)
+        Self::lookup_display(inner, scope, global)
     }
 
-    fn lookup_type(key: &str, local: &HashMap<String, Value>, global: Option<&HashMap<String, Value>>) -> String {
-        if let Some(v) = local.get(key) {
+    fn lookup_type(key: &str, scope: &Scope, global: Option<&HashMap<String, Value>>) -> String {
+        // 链式查找
+        if let Some(v) = scope.resolve(key) {
             return v.type_name().to_string();
         }
         if let Some(g) = global {
@@ -325,14 +345,12 @@ impl Val {
         String::new()
     }
 
-    /// 解析指针链：*a → 查找 *a 的值（目标变量名）→ 查找目标变量的值
-    /// 支持多级指针链，depth 限制递归深度防止循环引用
-    fn resolve_ptr_chain(ptr_key: &str, local: &HashMap<String, Value>, global: Option<&HashMap<String, Value>>, depth: usize) -> Option<String> {
+    /// 解析指针链：*a → 查找 *a 的值 → 查找目标变量的值
+    fn resolve_ptr_chain(ptr_key: &str, scope: &Scope, global: Option<&HashMap<String, Value>>, depth: usize) -> Option<String> {
         if depth == 0 {
             return None;
         }
-        // 查找指针变量本身
-        let ptr_val = if let Some(v) = local.get(ptr_key) {
+        let ptr_val = if let Some(v) = scope.resolve(ptr_key) {
             Some(v.display())
         } else if let Some(g) = global {
             g.get(ptr_key).map(|v| v.display())
@@ -344,31 +362,26 @@ impl Val {
             if target_name.is_empty() {
                 return Some(String::new());
             }
-            // 如果目标变量名也是指针，继续递归解引用
             if target_name.starts_with('*') {
-                return Self::resolve_ptr_chain(&target_name, local, global, depth - 1);
+                return Self::resolve_ptr_chain(&target_name, scope, global, depth - 1);
             }
-            // 查找目标变量（传递 depth-1 防止通过 lookup_display 循环）
-            let result = Self::lookup_display_depth(&target_name, local, global, depth - 1);
-            // 判断目标变量是否真实存在，而非依赖 %key% 格式字符串匹配
-            let target_exists = local.contains_key(&target_name)
+            let result = Self::lookup_display_depth(&target_name, scope, global, depth - 1);
+            let target_exists = scope.resolve(&target_name).is_some()
                 || global.map_or(false, |g| g.contains_key(&target_name))
-                || local.contains_key(&format!(".{}", &target_name))
+                || scope.resolve(&format!(".{}", &target_name)).is_some()
                 || global.map_or(false, |g| g.contains_key(&format!(".{}", &target_name)));
             if target_exists {
                 return Some(result);
             }
-            // 目标变量不存在，返回目标名本身作为字面值
             return Some(target_name);
         }
 
         None
     }
 
-    /// 解析指针链，返回最终存储变量的键名（不取值）
-    pub fn resolve_ptr_key(key: &str, local: &HashMap<String, Value>, global: Option<&HashMap<String, Value>>) -> String {
+    pub fn resolve_ptr_key(key: &str, scope: &Scope, global: Option<&HashMap<String, Value>>) -> String {
         let ptr_key = format!("*{}", key);
-        let ptr_val = if let Some(v) = local.get(&ptr_key) {
+        let ptr_val = if let Some(v) = scope.resolve(&ptr_key) {
             Some(v.display())
         } else if let Some(g) = global {
             g.get(&ptr_key).map(|v| v.display())
@@ -378,12 +391,11 @@ impl Val {
         match ptr_val {
             Some(ref target_name) if !target_name.is_empty() => {
                 if target_name.starts_with('*') {
-                    Self::resolve_ptr_key(target_name, local, global)
+                    Self::resolve_ptr_key(target_name, scope, global)
                 } else {
-                    // 递归检查目标是否也有指针
                     let nested_ptr_key = format!("*{}", target_name);
-                    if local.contains_key(&nested_ptr_key) || global.map_or(false, |g| g.contains_key(&nested_ptr_key)) {
-                        Self::resolve_ptr_key(target_name, local, global)
+                    if scope.resolve(&nested_ptr_key).is_some() || global.map_or(false, |g| g.contains_key(&nested_ptr_key)) {
+                        Self::resolve_ptr_key(target_name, scope, global)
                     } else {
                         target_name.clone()
                     }
@@ -393,59 +405,46 @@ impl Val {
         }
     }
 
-    /// 带深度限制的变量查找，防止指针链无限递归
-    fn lookup_display_depth(key: &str, local: &HashMap<String, Value>, global: Option<&HashMap<String, Value>>, depth: usize) -> String {
+    fn lookup_display_depth(key: &str, scope: &Scope, global: Option<&HashMap<String, Value>>, depth: usize) -> String {
         if depth == 0 {
-            // 深度耗尽，回退到普通查找
-            return Self::lookup_display_raw(key, local, global);
+            return Self::lookup_display_raw(key, scope, global);
         }
-        // 指针解引用：%a% 时若 *a 存在，则取 *a 的值作为目标变量名，再查找目标变量
-        // 重要：先检查直接变量是否存在，只有直接变量未命中时才走指针链，避免字符串误判为指针
         if !key.starts_with('*') {
-            let direct = Self::lookup_display_raw(key, local, global);
-            // 直接变量命中（不以 %key% 形式返回）→ 直接返回
+            let direct = Self::lookup_display_raw(key, scope, global);
             if !(direct.starts_with('%') && direct.ends_with('%')) {
                 return direct;
             }
-            // 直接变量不存在 → 尝试指针链解引用
             let ptr_key = format!("*{}", key);
-            if let Some(target) = Self::resolve_ptr_chain(&ptr_key, local, global, depth) {
+            if let Some(target) = Self::resolve_ptr_chain(&ptr_key, scope, global, depth) {
                 return target;
             }
             return direct;
         }
-        Self::lookup_display_raw(key, local, global)
+        Self::lookup_display_raw(key, scope, global)
     }
 
-    pub fn lookup_display(key: &str, local: &HashMap<String, Value>, global: Option<&HashMap<String, Value>>) -> String {
-        // 指针解引用：%a% 时若 *a 存在，则取 *a 的值作为目标变量名，再查找目标变量
-        // %*a% 直接返回 *a 的值（目标变量名），不再二次解引用
-        // 重要：先检查直接变量是否存在，只有直接变量未命中时才走指针链，避免字符串误判为指针
+    pub fn lookup_display(key: &str, scope: &Scope, global: Option<&HashMap<String, Value>>) -> String {
         if !key.starts_with('*') {
-            let direct = Self::lookup_display_raw(key, local, global);
-            // 直接变量命中（不以 %key% 形式返回）→ 直接返回
+            let direct = Self::lookup_display_raw(key, scope, global);
             if !(direct.starts_with('%') && direct.ends_with('%')) {
                 return direct;
             }
-            // 直接变量不存在 → 尝试指针链解引用
             let ptr_key = format!("*{}", key);
-            // 最多递归 8 层防止循环引用
-            if let Some(target) = Self::resolve_ptr_chain(&ptr_key, local, global, 8) {
+            if let Some(target) = Self::resolve_ptr_chain(&ptr_key, scope, global, 8) {
                 return target;
             }
             return direct;
         }
-        Self::lookup_display_raw(key, local, global)
+        Self::lookup_display_raw(key, scope, global)
     }
 
-    /// 原始变量查找（不含指针解引用）
-    fn lookup_display_raw(key: &str, local: &HashMap<String, Value>, global: Option<&HashMap<String, Value>>) -> String {
-
-        // 查找本地变量
-        if let Some(v) = local.get(key) {
+    /// 原始变量查找（链式：scope.resolve → global fallback）
+    fn lookup_display_raw(key: &str, scope: &Scope, global: Option<&HashMap<String, Value>>) -> String {
+        // 链式查找
+        if let Some(v) = scope.resolve(key) {
             return v.display();
         }
-        // 查找全局变量
+        // 全局 fallback
         if let Some(g) = global {
             if let Some(v) = g.get(key) {
                 return v.display();
@@ -454,7 +453,7 @@ impl Val {
         // 回退：查找 .key（点前缀全局变量）
         if !key.starts_with('.') {
             let dot_key = format!(".{}", key);
-            if let Some(v) = local.get(&dot_key) {
+            if let Some(v) = scope.resolve(&dot_key) {
                 return v.display();
             }
             if let Some(g) = global {
@@ -498,10 +497,8 @@ impl Val {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default();
                 let secs = now.as_secs();
-                // 转为本地时间（简单处理：用 UTC+8）
                 let secs = secs + 8 * 3600;
                 let days_since_epoch = secs / 86400;
-                // 简单推算年月日时分秒
                 let mut y = 1970;
                 let mut remaining_days = days_since_epoch as i64;
                 loop {
@@ -527,7 +524,7 @@ impl Val {
             _ => {
                 if key == "参数" {
                     let mut params: Vec<(usize, String)> = Vec::new();
-                    for (k, v) in local.iter() {
+                    for (k, v) in scope.iter_local() {
                         if let Some(num_str) = k.strip_prefix("参数") {
                             if let Ok(n) = num_str.parse::<usize>() {
                                 if n > 0 {
@@ -571,7 +568,6 @@ impl Val {
 
 /* ===================== 工具函数 ===================== */
 
-/// 解析 [] 格式的 JSON 路径
 pub fn parse_bracket_path(input: &str) -> Option<(&str, Vec<String>)> {
     if let Some(bracket_pos) = input.find('[') {
         let var_name = &input[..bracket_pos];
@@ -600,7 +596,6 @@ pub fn parse_bracket_path(input: &str) -> Option<(&str, Vec<String>)> {
     } else { None }
 }
 
-/// JSON 路径导航：按 keys 逐级访问 JSON 值
 fn navigate_json<'a>(val: &'a serde_json::Value, keys: &[String]) -> Option<&'a serde_json::Value> {
     let mut cur = val;
     for key in keys {
@@ -616,8 +611,6 @@ fn navigate_json<'a>(val: &'a serde_json::Value, keys: &[String]) -> Option<&'a 
     Some(cur)
 }
 
-/// 解析文本切片语法：varName[start:end:step]
-/// 返回 (变量名, (start_opt, end_opt, step_opt))
 fn parse_text_slice(input: &str) -> Option<(&str, (Option<isize>, Option<isize>, Option<isize>))> {
     if let Some(bracket_pos) = input.find('[') {
         let var_name = &input[..bracket_pos];
@@ -641,17 +634,13 @@ fn parse_text_slice(input: &str) -> Option<(&str, (Option<isize>, Option<isize>,
     None
 }
 
-/// 应用文本切片到字符串（Python 风格切片语义）
 fn apply_text_slice(s: &str, slice: (Option<isize>, Option<isize>, Option<isize>)) -> String {
     let chars: Vec<char> = s.chars().collect();
     let len = chars.len() as isize;
     let step = slice.2.unwrap_or(1);
 
-    if step == 0 {
-        return String::new();
-    }
+    if step == 0 { return String::new(); }
 
-    // 将索引解析为实际位置
     let resolve = |idx: Option<isize>, default: isize| -> isize {
         match idx {
             Some(i) => {
@@ -683,12 +672,11 @@ fn apply_text_slice(s: &str, slice: (Option<isize>, Option<isize>, Option<isize>
 }
 
 /// 扫描文本中的 @var[slice] 快捷截取语法并替换
-fn resolve_at_slices(input: &str, local: &HashMap<String, Value>, global: Option<&HashMap<String, Value>>) -> String {
+fn resolve_at_slices(input: &str, scope: &Scope, global: Option<&HashMap<String, Value>>) -> String {
     if !input.contains('@') {
         return input.to_string();
     }
 
-    // 若包含 \x01 标记，说明含 :: 原始值，跳过 @ 截取展开
     if input.contains('\x01') {
         return input.to_string();
     }
@@ -700,7 +688,6 @@ fn resolve_at_slices(input: &str, local: &HashMap<String, Value>, global: Option
 
     while i < len {
         if chars[i] == '@' && i + 1 < len {
-            // @ 后面必须是变量名字符开头（字母、数字、中文、下划线）
             let next = chars[i + 1];
             if !next.is_alphanumeric() && next != '_' && !is_cjk(next) {
                 result.push('@');
@@ -708,7 +695,6 @@ fn resolve_at_slices(input: &str, local: &HashMap<String, Value>, global: Option
                 continue;
             }
 
-            // 收集变量名
             let var_start = i + 1;
             let mut var_end = var_start;
             while var_end < len {
@@ -721,7 +707,6 @@ fn resolve_at_slices(input: &str, local: &HashMap<String, Value>, global: Option
             }
 
             if var_end > var_start && var_end < len && chars[var_end] == '[' {
-                // 找配对的 ]
                 let bracket_start = var_end;
                 let mut depth = 1;
                 let mut bracket_end = bracket_start + 1;
@@ -737,7 +722,6 @@ fn resolve_at_slices(input: &str, local: &HashMap<String, Value>, global: Option
                 if depth == 0 {
                     let slice_content: String = chars[bracket_start + 1..bracket_end - 1].iter().collect();
                     if slice_content.contains(':') {
-                        // 这是一个 @var[slice] 文本切片
                         let var_name: String = chars[var_start..var_end].iter().collect();
                         let parts: Vec<&str> = slice_content.split(':').collect();
                         if parts.len() >= 2 && parts.len() <= 3 {
@@ -749,7 +733,7 @@ fn resolve_at_slices(input: &str, local: &HashMap<String, Value>, global: Option
                             let step = if parts.len() == 3 { parse_part(parts[2]) } else { None };
                             let slice = (start, end, step);
 
-                            let val = Val::lookup_display(&var_name, local, global);
+                            let val = Scope::lookup_display(&var_name, scope, global);
                             if !val.is_empty() && !val.starts_with('%') {
                                 result.push_str(&apply_text_slice(&val, slice));
                             }
@@ -840,45 +824,50 @@ fn urlencoding_encode(input: &str) -> String {
 
 /* ===================== DicVal ===================== */
 
+/// 词库双层变量存储：本地作用域 + 全局作用域
+///
+/// - `p`: 本地变量（含 enclosing 链，支持 Python 风格链式查找）
+/// - `g`: 全局变量（Arc 共享，所有上下文共享）
 #[derive(Debug, Clone)]
 pub struct DicVal {
-    pub p: Val,
-    pub(crate) g: Arc<Val>,
+    pub p: Scope,
+    pub(crate) g: Arc<Scope>,
 }
 
 #[allow(dead_code)]
 impl DicVal {
     pub fn new() -> Self {
-        DicVal { p: Val::new(), g: Arc::new(Val::new()) }
+        let g = Arc::new(Scope::new());
+        let p = Scope::with_enclosing(Arc::clone(&g));
+        DicVal { p, g }
     }
 
     pub fn text(&mut self, input: &str) -> String {
         if input.is_empty() { return String::new(); }
         if !input.contains('%') {
             if input.contains('@') {
-                return resolve_at_slices(input, self.p.get_all(), Some(self.g.get_all()));
+                return resolve_at_slices(input, &self.p, Some(self.g.get_all()));
             }
             return input.to_string();
         }
-        // 先处理 %++var% 自增 / %--var% 自减语法
         let input = self.resolve_incr(input);
         let input = self.resolve_decr(input);
-        Val::text_with_vals(&input, self.p.get_all(), Some(self.g.get_all()))
+        Scope::text_with_vals(&input, &self.p, Some(self.g.get_all()))
     }
 
-    /// 纯变量替换（不处理 ++ 自增），用于不需要改动的上下文
+    /// 纯变量替换（不处理 ++ 自增）
     pub fn text_immut(&self, input: &str) -> String {
         if input.is_empty() { return String::new(); }
         if !input.contains('%') {
             if input.contains('@') {
-                return resolve_at_slices(input, self.p.get_all(), Some(self.g.get_all()));
+                return resolve_at_slices(input, &self.p, Some(self.g.get_all()));
             }
             return input.to_string();
         }
-        Val::text_with_vals(input, self.p.get_all(), Some(self.g.get_all()))
+        Scope::text_with_vals(input, &self.p, Some(self.g.get_all()))
     }
 
-    /// 预处理 %++var%：变量自增，返回自增后的值。变量不存在默认 0。
+    /// 预处理 %++var%：变量自增
     fn resolve_incr(&mut self, input: &str) -> String {
         if !input.contains("%++") {
             return input.to_string();
@@ -887,10 +876,10 @@ impl DicVal {
         let mut rest = input;
         while let Some(pct) = rest.find("%++") {
             result.push_str(&rest[..pct]);
-            rest = &rest[pct + 3..]; // 跳过 "%++"
+            rest = &rest[pct + 3..];
             if let Some(close) = rest.find('%') {
                 let var_name = &rest[..close];
-                let current = self.p.get_display(var_name);
+                let current = self.p.get_cloned(var_name);
                 let current_num: i64 = if current.is_empty() { 0 } else { current.parse().unwrap_or(0) };
                 let new_val = current_num + 1;
                 self.p.set_string(var_name, new_val.to_string());
@@ -904,7 +893,7 @@ impl DicVal {
         result
     }
 
-    /// 预处理 %--var%：变量自减，返回自减后的值。变量不存在默认 0。
+    /// 预处理 %--var%：变量自减
     fn resolve_decr(&mut self, input: String) -> String {
         if !input.contains("%--") {
             return input;
@@ -913,10 +902,10 @@ impl DicVal {
         let mut rest: &str = &input;
         while let Some(pct) = rest.find("%--") {
             result.push_str(&rest[..pct]);
-            rest = &rest[pct + 3..]; // 跳过 "%--"
+            rest = &rest[pct + 3..];
             if let Some(close) = rest.find('%') {
                 let var_name = &rest[..close];
-                let current = self.p.get_display(var_name);
+                let current = self.p.get_cloned(var_name);
                 let current_num: i64 = if current.is_empty() { 0 } else { current.parse().unwrap_or(0) };
                 let new_val = current_num - 1;
                 self.p.set_string(var_name, new_val.to_string());
@@ -930,31 +919,15 @@ impl DicVal {
         result
     }
 
-    pub fn run_count_text(&self, content: &str) -> String {
-        crate::count::run_count_text(self, content)
-    }
+    // ─── 全局变量访问（通过链根写入） ───
 
-    pub fn set_g_string(&mut self, key: &str, value: String) {
+    /// 在全局作用域（链根）写入变量
+    pub fn set_global(&mut self, key: &str, value: String) {
         Arc::make_mut(&mut self.g).set_string(key, value);
     }
 
-    pub fn set_g_val(&mut self, key: &str, value: Value) {
-        Arc::make_mut(&mut self.g).set_val(key, value);
-    }
-
-    pub fn get_g(&self, key: &str) -> Option<&Value> {
-        self.g.get(key)
-    }
-
-    pub fn get_g_cloned(&self, key: &str) -> String {
-        self.g.get_display(key)
-    }
-
-    pub fn share_g(&self) -> Arc<Val> {
+    /// 获取全局作用域的 Arc 引用
+    pub fn global(&self) -> Arc<Scope> {
         Arc::clone(&self.g)
-    }
-
-    pub fn set_g_arc(&mut self, g: Arc<Val>) {
-        self.g = g;
     }
 }

@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
+﻿use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use crate::value::DicVal;
+use crate::value::{DicVal, Scope};
 use crate::parser::{BuildDic, BuildValue};
 use crate::analyzer::val_text_test;
 use crate::iftext::IfText;
@@ -445,6 +445,16 @@ impl DicContext {
                 };
                 if let Some(pkg_bv) = bv.packages.get(&pkg_key) {
                     if !processed_heads.insert(pkg_key.clone()) { continue; }
+                    // 为无前缀的 #引入=path 也分配包指针，使 %包名% 可访问
+                    if self.val.p.get(&pkg_key).is_none() {
+                        let handle = crate::functions::pool_alloc_package(&pkg_key);
+                        self.val.p.set_string(&pkg_key, handle);
+                        // 从 init_lines 中移除对该变量的旧赋值，防止 exec_init 覆盖池指针
+                        shared.init_lines.retain(|line| {
+                            let (t, p, _) = val_text_test(line);
+                            !(t == 6 && p == pkg_key)
+                        });
+                    }
                     for pkg_line in &pkg_bv.head {
                         let (pv_type, pv_prefix, pv_suffix) = val_text_test(pkg_line);
                         if pv_type == 6 && !pv_prefix.is_empty() {
@@ -537,7 +547,7 @@ impl DicContext {
     /// 注入变量（同时设置局部和全局）
     pub fn inject_var(&mut self, key: &str, value: String) {
         self.val.p.set_string(key, value.clone());
-        self.val.set_g_string(key, value);
+        self.val.set_global(key, value);
     }
 
     /// 解析 %包名.变量% 引入包变量（仅头部变量，不执行代码）
@@ -562,8 +572,7 @@ impl DicContext {
 
             let resolved = if let Some(bv) = self.shared.packages.get(&pkg) {
                 let override_key = format!("{}.{}", pkg, key);
-                let local_override = self.val.p.get(&override_key)
-                    .or_else(|| self.val.get_g(&override_key));
+                let local_override = self.val.p.resolve(&override_key);
                 if let Some(val) = local_override {
                     let s = val.display();
                     if !s.is_empty() && !s.contains('%') {
@@ -1435,12 +1444,12 @@ impl DicContext {
     }
 
     /// 为子调用（函数/OOP方法）创建全新变量上下文，变量完全隔离
+    /// p.enclosing 直接指向 g（全局根），不链入父调用者的局部变量（Python 函数语义）
     pub(crate) fn fresh_sub_context(&self) -> DicContext {
+        let g = self.val.global();
+        let p = Scope::with_enclosing(Arc::clone(&g));
         DicContext {
-            val: DicVal {
-                g: self.val.share_g(),
-                ..DicVal::new()
-            },
+            val: DicVal { p, g },
             sys: SysV::default(),
             output: Output::new(),
             shared: Arc::new(SharedContext {
@@ -1463,10 +1472,10 @@ impl DicContext {
     /// 加载实例变量 (.field) 到子上下文，以 raw_obj 和 resolved_obj 为前缀
     pub(crate) fn load_instance_vars(&self, sub_ctx: &mut DicContext, raw_obj: &str, resolved_obj: &str) {
         for prefix in [&format!("{}.", raw_obj), &format!("{}.", resolved_obj)] {
-            for (key, val) in self.val.p.obj.iter() {
+            for (key, val) in self.val.p.iter_local() {
                 if let Some(field) = key.strip_prefix(prefix.as_str()) {
                     let dot_key = format!(".{}", field);
-                    if !sub_ctx.val.p.obj.contains_key(&dot_key) {
+                    if !sub_ctx.val.p.contains_key_local(&dot_key) {
                         sub_ctx.val.p.set_string(&dot_key, val.display());
                     }
                     sub_ctx.val.p.set_string(key, val.display());
@@ -1477,7 +1486,7 @@ impl DicContext {
 
     /// 保存子上下文实例变量 (.field) 回主上下文（非构造函数执行后）
     pub(crate) fn save_instance_vars(&mut self, sub_ctx: &DicContext, raw_obj: &str, resolved_obj: &str) {
-        for (key, val) in sub_ctx.val.p.obj.iter() {
+        for (key, val) in sub_ctx.val.p.iter_local() {
             if let Some(field) = key.strip_prefix('.') {
                 self.val.p.set_string(&format!("{}.{}", raw_obj, field), val.display());
                 if resolved_obj != raw_obj {
@@ -1489,7 +1498,7 @@ impl DicContext {
 
     /// 保存构造函数实例变量，以 0x handle 为前缀
     pub(crate) fn save_ctor_instance_vars(&mut self, sub_ctx: &DicContext, handle: &str) {
-        for (key, val) in sub_ctx.val.p.obj.iter() {
+        for (key, val) in sub_ctx.val.p.iter_local() {
             if let Some(field) = key.strip_prefix('.') {
                 self.val.p.set_string(&format!("{}.{}", handle, field), val.display());
             }
@@ -2731,7 +2740,7 @@ impl Nebula {
     /// 注入变量（同时设置局部和全局，优先级低于词库内定义）
     pub fn inject_var(&mut self, key: &str, value: &str) -> &mut Self {
         self.ctx.val.p.set_string(key, value.to_string());
-        self.ctx.val.set_g_string(key, value.to_string());
+        self.ctx.val.set_global(key, value.to_string());
         self
     }
 

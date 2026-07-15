@@ -12,7 +12,7 @@
 //!   子线程 = NR 脚本执行器
 //!   两个线程通过 mpsc channel 通信
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, BufRead, Read, Write};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -122,7 +122,12 @@ pub struct SharedDebugState {
     pub current_line: usize,
     pub depth: usize,
     pub call_stack: Vec<StackFrame>,
-    pub variables: HashMap<String, String>,
+    /// 作用域链：[(作用域名, 变量表)]，从局部到全局
+    pub scope_chain: Vec<(String, HashMap<String, String>)>,
+    /// 嵌套变量子表：variablesReference → children as Value
+    nested_var_map: HashMap<u64, Vec<Value>>,
+    /// 嵌套引用计数器
+    next_nested_ref: u64,
     /// 暂停期间收到的步进命令，留给恢复后的第一条语句使用
     step_pending: Option<StepIntent>,
 }
@@ -137,7 +142,9 @@ impl SharedDebugState {
             current_line: 0,
             depth: 0,
             call_stack: Vec::new(),
-            variables: HashMap::new(),
+            scope_chain: Vec::new(),
+            nested_var_map: HashMap::new(),
+            next_nested_ref: 1_000_000,
             step_pending: None,
         }
     }
@@ -501,39 +508,66 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
 
-                let var_count = {
+                let scopes: Vec<Value> = {
                     let ds = shared.lock().unwrap();
-                    ds.variables.len()
+                    ds.scope_chain.iter().enumerate().map(|(i, (name, vars))| {
+                        json!({
+                            "name": name,
+                            "variablesReference": (frame_id + 1000) * 10 + (i as u64),
+                            "namedVariables": vars.len(),
+                            "indexedVariables": 0,
+                            "expensive": false,
+                        })
+                    }).collect()
                 };
 
                 seq += 1;
                 send_message(&mut writer, &dap_response(seq, "scopes", request_seq, true,
-                    Some(json!({
-                        "scopes": [{
-                            "name": "局部变量",
-                            "variablesReference": frame_id + 1000,
-                            "namedVariables": var_count,
-                            "indexedVariables": 0,
-                            "expensive": false,
-                        }]
-                    }))));
+                    Some(json!({ "scopes": scopes }))));
             }
 
             "variables" => {
-                let ds = shared.lock().unwrap();
-                let vars: Vec<Value> = ds.variables.iter().map(|(name, val)| {
-                    let dv = if val.chars().count() > 200 {
-                        format!("{}...", val.chars().take(200).collect::<String>())
-                    } else {
-                        val.clone()
-                    };
-                    json!({ "name": name, "value": dv, "variablesReference": 0 })
-                }).collect();
-                drop(ds);
+                let var_ref = args
+                    .and_then(|a| a.get("variablesReference"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
 
-                seq += 1;
-                send_message(&mut writer, &dap_response(seq, "variables", request_seq, true,
-                    Some(json!({ "variables": vars }))));
+                // 判断引用类型
+                if var_ref >= 1_000_000 {
+                    // 嵌套变量引用：查 nested_var_map
+                    let ds = shared.lock().unwrap();
+                    let vars: Vec<Value> = ds.nested_var_map
+                        .get(&var_ref)
+                        .cloned()
+                        .unwrap_or_default();
+                    drop(ds);
+                    seq += 1;
+                    send_message(&mut writer, &dap_response(seq, "variables", request_seq, true,
+                        Some(json!({ "variables": vars }))));
+                } else {
+                    // 作用域引用：构建嵌套树
+                    let scope_idx = (var_ref % 10) as usize;
+                    let ds = shared.lock().unwrap();
+                    let flat_map = ds.scope_chain
+                        .get(scope_idx)
+                        .map(|(_, m)| m.clone());
+                    let mut next_ref = ds.next_nested_ref;
+                    drop(ds);
+
+                    let (vars, new_nested) = flat_map
+                        .as_ref()
+                        .map(|m| build_nested_vars(m, &mut next_ref))
+                        .unwrap_or_default();
+
+                    let mut ds = shared.lock().unwrap();
+                     ds.nested_var_map = new_nested;
+                     ds.next_nested_ref = next_ref;
+                     drop(ds);
+
+                     seq += 1;
+                    send_message(&mut writer, &dap_response(seq, "variables", request_seq, true,
+                        Some(json!({ "variables": vars }))));
+                }
             }
 
             "disconnect" => {
@@ -568,6 +602,122 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
 
 /* ===================== 断点检查（executor 调用） ===================== */
 
+/// 将扁平变量表构建为嵌套树。
+/// 例如 `test.a` → test 节点包含子节点 a
+/// 返回 (顶层变量列表, nested_var_map)
+fn build_nested_vars(
+    flat: &HashMap<String, String>,
+    next_ref: &mut u64,
+) -> (Vec<Value>, HashMap<u64, Vec<Value>>) {
+    // 1. 构建树：根节点 + 子节点
+    struct Node {
+        leaf_val: Option<String>,
+        children: BTreeMap<String, Node>,
+    }
+
+    let mut root = BTreeMap::<String, Node>::new();
+
+    for (name, val) in flat {
+        let mut parts: Vec<&str> = name.split('.').collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let first = parts.remove(0).to_string();
+
+        if parts.is_empty() {
+            // 叶子变量：直接赋值
+            let node = root.entry(first).or_insert_with(|| Node {
+                leaf_val: None,
+                children: BTreeMap::new(),
+            });
+            node.leaf_val = Some(val.clone());
+        } else {
+            // 嵌套路径：逐级插入
+            let leaf_key = parts.pop().unwrap().to_string();
+            let leaf_val = val.clone();
+            let mut cur = root.entry(first).or_insert_with(|| Node {
+                leaf_val: None,
+                children: BTreeMap::new(),
+            });
+            for part in parts {
+                cur = cur.children.entry(part.to_string()).or_insert_with(|| Node {
+                    leaf_val: None,
+                    children: BTreeMap::new(),
+                });
+            }
+            let leaf = cur.children.entry(leaf_key).or_insert_with(|| Node {
+                leaf_val: None,
+                children: BTreeMap::new(),
+            });
+            leaf.leaf_val = Some(leaf_val);
+        }
+    }
+
+    // 2. 扁平化树 → DAP variables
+    fn flatten(
+         tree: BTreeMap<String, Node>,
+         next_ref: &mut u64,
+         nested: &mut HashMap<u64, Vec<Value>>,
+     ) -> Vec<Value> {
+        let mut result = Vec::new();
+        // 用 BTreeMap 保证稳定顺序
+        for (name, node) in tree {
+            let leaf_str = node.leaf_val.as_deref().unwrap_or("");
+            if node.children.is_empty() {
+                // 纯叶子：无子节点
+                let dv = truncate_val(leaf_str);
+                result.push(json!({ "name": name, "value": dv, "variablesReference": 0 }));
+            } else {
+                // 容器：分配 nested ref，递归子节点
+                let child_vars = flatten(node.children, next_ref, nested);
+                let ref_id = *next_ref;
+                *next_ref += 1;
+
+                // 构建内联摘要：{key: val, ...}
+                let mut parts: Vec<String> = child_vars.iter()
+                    .filter_map(|v| {
+                        let name = v.get("name")?.as_str()?;
+                        let val = v.get("value")?.as_str().unwrap_or("");
+                        if val.len() > 30 {
+                            Some(format!("{}: {}...", name, &val[..30]))
+                        } else {
+                            Some(format!("{}: {}", name, val))
+                        }
+                    })
+                    .collect();
+                let contents = if parts.len() > 3 {
+                    parts.truncate(3);
+                    format!("{}, ...", parts.join(", "))
+                } else {
+                    parts.join(", ")
+                };
+
+                let summary = if leaf_str.is_empty() {
+                    format!("*{} {{{}}}", name, contents)
+                } else {
+                    format!("{} *{} {{{}}}", leaf_str, name, contents)
+                };
+                nested.insert(ref_id, child_vars);
+                result.push(json!({ "name": name, "value": summary, "variablesReference": ref_id }));
+            }
+        }
+        result
+    }
+
+    let mut nested = HashMap::new();
+    let vars = flatten(root, next_ref, &mut nested);
+    (vars, nested)
+}
+
+/// 截断过长值
+fn truncate_val(val: &str) -> String {
+    if val.chars().count() > 200 {
+        format!("{}...", val.chars().take(200).collect::<String>())
+    } else {
+        val.to_string()
+    }
+}
+
 /// executor 在每条语句执行前调用，检查是否该暂停。
 /// 返回 true = 继续执行，false = 终止。
 pub fn check_debug_before_exec(
@@ -577,7 +727,7 @@ pub fn check_debug_before_exec(
     file: &str,
     line: usize,
     depth: usize,
-    variables: &HashMap<String, String>,
+    scope_chain: &[(String, HashMap<String, String>)],
     call_stack: &[StackFrame],
 ) -> bool {
     let mut ds = shared.lock().unwrap();
@@ -590,7 +740,7 @@ pub fn check_debug_before_exec(
     ds.current_file = file.to_string();
     ds.current_line = line;
     ds.depth = depth;
-    ds.variables = variables.clone();
+    ds.scope_chain = scope_chain.to_vec();
     ds.call_stack = call_stack.to_vec();
     // 更新栈顶帧的行号为当前执行行
     if let Some(top) = ds.call_stack.last_mut() {

@@ -1088,8 +1088,8 @@ fn run_server(
                 if !Arc::ptr_eq(&base_ctx.shared, &req_ctx.shared) {
                     base_ctx.shared = req_ctx.shared.clone();
                 }
-                let rheader_raw = crate::value::Val::lookup_display("_设置头部", req_ctx.val.p.get_all(), Some(req_ctx.val.g.get_all()));
-                let status_code = crate::value::Val::lookup_display("_状态码", req_ctx.val.p.get_all(), Some(req_ctx.val.g.get_all()));
+                let rheader_raw = crate::value::Scope::lookup_display("_设置头部", &req_ctx.val.p, Some(req_ctx.val.g.get_all()));
+                let status_code = crate::value::Scope::lookup_display("_状态码", &req_ctx.val.p, Some(req_ctx.val.g.get_all()));
                 let body = req_ctx.output.get();
                 std::mem::swap(&mut base_ctx.val, &mut req_ctx.val);
                 (body, rheader_raw, status_code)
@@ -1188,9 +1188,9 @@ fn mime_from_path(path: &str) -> &'static str {
 /// 从变量或直接函数名解析出实际的函数名
 fn resolve_handler_name(ctx: &DicContext, handler_ref: &Option<String>) -> Option<String> {
     let raw = handler_ref.as_ref()?;
-    let resolved = crate::value::Val::text_with_vals(
+    let resolved = crate::value::Scope::text_with_vals(
         &format!("%{}%", raw),
-        ctx.val.p.get_all(),
+        &ctx.val.p,
         Some(ctx.val.g.get_all()),
     );
     if !resolved.is_empty() && !resolved.starts_with('%') {
@@ -3413,11 +3413,7 @@ pub(crate) fn process_pkg_head_vars(parent_val: &crate::value::DicVal, sub_ctx: 
         if v_type == 6 && !v_prefix.is_empty() {
             let value = if let Some(pfx) = override_prefix {
                 let override_key = format!("{}.{}", pfx, v_prefix);
-                if let Some(ov) = parent_val.p.get(&override_key) {
-                    let ov_str = ov.display();
-                    if !ov_str.is_empty() && !ov_str.contains('%') { ov_str }
-                    else { sub_ctx.val.text(&v_suffix) }
-                } else if let Some(ov) = parent_val.get_g(&override_key) {
+                if let Some(ov) = parent_val.p.resolve(&override_key) {
                     let ov_str = ov.display();
                     if !ov_str.is_empty() && !ov_str.contains('%') { ov_str }
                     else { sub_ctx.val.text(&v_suffix) }
@@ -3495,7 +3491,7 @@ pub(crate) fn inject_star_import_head_vars(ctx: &DicContext, sub_ctx: &mut DicCo
             }
         }
     } else {
-        for (key, val) in ctx.val.p.obj.iter() {
+        for (key, val) in ctx.val.p.iter_local() {
             sub_ctx.val.p.set_string(key, val.display());
         }
     }
@@ -3507,7 +3503,7 @@ pub(crate) fn writeback_ptr_vars(ctx: &mut DicContext, sub_ctx: &DicContext, raw
         if raw_arg.starts_with('%') && raw_arg.ends_with('%') && raw_arg.len() > 2 {
             let var_name = &raw_arg[1..raw_arg.len()-1];
             let ptr_key = format!("*{}", var_name);
-            if ctx.val.p.get(&ptr_key).is_some() || ctx.val.get_g(&ptr_key).is_some() {
+            if ctx.val.p.resolve(&ptr_key).is_some() {
                 if i >= arg_offset {
                     let idx = i - arg_offset;
                     if idx < param_names.len() {
