@@ -247,7 +247,7 @@ struct ServerData {
 /// Python range(stop) 或 range(start, stop, step)
 /// 返回 JSON 数组字符串
 fn range_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let a = resolve_num(ctx, args.get(1).map(|s| s.as_str()).unwrap_or("")).unwrap_or(0) as i64;
+    let a = get_arg_num(ctx, args, 1) as i64;
     let b = args.get(2).and_then(|s| resolve_num(ctx, s)).map(|n| n as i64);
     let c = args.get(3).and_then(|s| resolve_num(ctx, s)).map(|n| n as i64);
 
@@ -285,7 +285,7 @@ fn range_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Str
 
 /// Python enumerate(list) — 返回 [[index, value], ...]
 fn enumerate_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let list_str = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let list_str = get_arg_resolved(ctx, args, 1);
     let arr: Vec<serde_json::Value> = serde_json::from_str(&list_str).unwrap_or_default();
     let result: Vec<serde_json::Value> = arr
         .into_iter()
@@ -297,8 +297,8 @@ fn enumerate_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option
 
 /// Python zip(list_a, list_b) — 配对两个 JSON 数组
 fn zip_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let a_str = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let b_str = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let a_str = get_arg_resolved(ctx, args, 1);
+    let b_str = get_arg_resolved(ctx, args, 2);
     let a: Vec<serde_json::Value> = serde_json::from_str(&a_str).unwrap_or_default();
     let b: Vec<serde_json::Value> = serde_json::from_str(&b_str).unwrap_or_default();
     let len = a.len().min(b.len());
@@ -310,7 +310,7 @@ fn zip_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Strin
 
 /// Python reversed(list) — 反转 JSON 数组
 fn reversed_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let list_str = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let list_str = get_arg_resolved(ctx, args, 1);
     let mut arr: Vec<serde_json::Value> = serde_json::from_str(&list_str).unwrap_or_default();
     arr.reverse();
     Some(serde_json::Value::Array(arr).to_string())
@@ -318,7 +318,7 @@ fn reversed_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<
 
 /// Python sorted(list, reverse?) — 排序 JSON 数组
 fn sorted_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let list_str = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let list_str = get_arg_resolved(ctx, args, 1);
     let reverse = args.get(2).map(|s| s.as_str()).unwrap_or("") == "true";
     let mut arr: Vec<serde_json::Value> = serde_json::from_str(&list_str).unwrap_or_default();
     arr.sort_by(|a, b| {
@@ -334,7 +334,7 @@ fn sorted_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
 
 /// Python all(list) — 所有元素为真返回 "1"，否则 ""
 fn all_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let list_str = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let list_str = get_arg_resolved(ctx, args, 1);
     let arr: Vec<serde_json::Value> = serde_json::from_str(&list_str).unwrap_or_default();
     let all_true = arr.iter().all(|v| is_truthy_val(v));
     Some(if all_true { "1".to_string() } else { String::new() })
@@ -342,7 +342,7 @@ fn all_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Strin
 
 /// Python any(list) — 任一元素为真返回 "1"，否则 ""
 fn any_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let list_str = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let list_str = get_arg_resolved(ctx, args, 1);
     let arr: Vec<serde_json::Value> = serde_json::from_str(&list_str).unwrap_or_default();
     let any_true = arr.iter().any(|v| is_truthy_val(v));
     Some(if any_true { "1".to_string() } else { String::new() })
@@ -350,8 +350,8 @@ fn any_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Strin
 
 /// Python map(fn_name, list) — 对列表每个元素调用函数，返回结果列表
 fn map_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let fn_name = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let list_str = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let fn_name = get_arg_resolved(ctx, args, 1);
+    let list_str = get_arg_resolved(ctx, args, 2);
     let arr: Vec<serde_json::Value> = serde_json::from_str(&list_str).unwrap_or_default();
 
     let fn_ptr = ctx.shared.builtins.get(&fn_name).copied();
@@ -374,8 +374,8 @@ fn map_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Strin
 
 /// Python filter(fn_name, list) — 过滤列表，保留函数返回值为真的元素
 fn filter_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let fn_name = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let list_str = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let fn_name = get_arg_resolved(ctx, args, 1);
+    let list_str = get_arg_resolved(ctx, args, 2);
     let arr: Vec<serde_json::Value> = serde_json::from_str(&list_str).unwrap_or_default();
 
     let fn_ptr = ctx.shared.builtins.get(&fn_name).copied();
@@ -398,28 +398,28 @@ fn filter_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
 
 /// Python bool(value) — 真值转换，返回 "true" 或 ""
 fn to_bool_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let s = get_arg_resolved(ctx, args, 1);
     let is_true = !s.is_empty() && s != "0" && s != "false" && s != "null";
     Some(if is_true { "true".to_string() } else { String::new() })
 }
 
 /// Python chr(i) — Unicode 码点转字符
 fn chr_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let n = resolve_num(ctx, args.get(1).map(|s| s.as_str()).unwrap_or("")).unwrap_or(0);
+    let n = get_arg_num(ctx, args, 1);
     let c = char::from_u32(n as u32).unwrap_or('\u{FFFD}');
     Some(c.to_string())
 }
 
 /// Python ord(c) — 字符转 Unicode 码点
 fn ord_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let s = get_arg_resolved(ctx, args, 1);
     let code = s.chars().next().map(|c| c as u32).unwrap_or(0);
     Some(code.to_string())
 }
 
 /// Python bin(n) — 整数转二进制字符串（0b 前缀），支持负数
 fn bin_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let n = resolve_num(ctx, args.get(1).map(|s| s.as_str()).unwrap_or("")).unwrap_or(0) as i64;
+    let n = get_arg_num(ctx, args, 1) as i64;
     let abs = n.unsigned_abs();
     let sign = if n < 0 { "-" } else { "" };
     Some(format!("{}0b{:b}", sign, abs))
@@ -427,7 +427,7 @@ fn bin_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Strin
 
 /// Python hex(n) — 整数转十六进制字符串（0x 前缀）
 fn hex_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let n = resolve_num(ctx, args.get(1).map(|s| s.as_str()).unwrap_or("")).unwrap_or(0) as i64;
+    let n = get_arg_num(ctx, args, 1) as i64;
     let abs = n.unsigned_abs();
     let sign = if n < 0 { "-" } else { "" };
     Some(format!("{}0x{:x}", sign, abs))
@@ -435,8 +435,8 @@ fn hex_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Strin
 
 /// Python divmod(a, b) — 返回 [商, 余] JSON 数组
 fn divmod_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let a = resolve_num(ctx, args.get(1).map(|s| s.as_str()).unwrap_or("")).unwrap_or(0) as i64;
-    let b = resolve_num(ctx, args.get(2).map(|s| s.as_str()).unwrap_or("")).unwrap_or(1) as i64;
+    let a = get_arg_num(ctx, args, 1) as i64;
+    let b = get_arg_num(ctx, args, 2).max(1) as i64;
     let b = if b == 0 { 1 } else { b };
     let div = a / b;
     let rem = a % b;
@@ -446,8 +446,8 @@ fn divmod_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
 /// $ed25519签名 seed msg$ — 从 32 字节种子生成 ed25519 密钥对，对消息签名
 /// 返回 64 字节签名（latin-1 编码字符串，每个字符为一个字节，需配合 $hex编码$ 使用）
 fn ed25519_sign_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let seed_str = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let msg_str = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let seed_str = get_arg_resolved(ctx, args, 1);
+    let msg_str = get_arg_resolved(ctx, args, 2);
 
     // 取前 32 字节作为种子（对标 Go: seed = secret[:32]）
     let seed_bytes_raw = seed_str.as_bytes();
@@ -466,7 +466,7 @@ fn ed25519_sign_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opt
 /// $hex编码 data$ — 将字节字符串转为十六进制表示
 /// 每个字节转为两个 hex 字符，如 "abc" → "616263"
 fn hex_encode_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let data = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let data = get_arg_resolved(ctx, args, 1);
     let hex_str: String = data.chars().map(|c| format!("{:02x}", c as u8)).collect();
     Some(hex_str)
 }
@@ -785,7 +785,12 @@ fn print_core(ctx: &mut DicContext, args: &[String]) -> String {
     let value = args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
     let texted = ctx.val.text(&value);
     let result = crate::count::run_count_text(&ctx.val, &texted);
-    println!("{}", crate::analyzer::unescape_newline(&result));
+    if ctx.debug_mode {
+        // DAP 模式：走 output 而非 println!，避免污染 stdout 协议通道
+        ctx.output.add(&format!("{}\n", crate::analyzer::unescape_newline(&result)));
+    } else {
+        println!("{}", crate::analyzer::unescape_newline(&result));
+    }
     result
 }
 
@@ -1344,7 +1349,7 @@ fn len_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Strin
 
 /// $截取 [字符串] [起始] [长度]$ — 提取子串（下标从0开始，长度可选）
 fn substr_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let s = get_arg_resolved(ctx, args, 1);
     let start: usize = args
         .get(2)
         .map(|a| resolve_num(ctx, a).unwrap_or(0))
@@ -1364,16 +1369,16 @@ fn substr_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
 
 /// $替换 [字符串] [旧内容] [新内容]$ — 替换所有匹配
 fn replace_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let from = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
-    let to = ctx.val.text(args.get(3).map(|s| s.as_str()).unwrap_or(""));
+    let s = get_arg_resolved(ctx, args, 1);
+    let from = get_arg_resolved(ctx, args, 2);
+    let to = get_arg_resolved(ctx, args, 3);
     Some(s.replace(&from, &to))
 }
 
 /// $删前缀 [字符串] [前缀]$ — 删除字符串开头的匹配前缀
 fn trim_prefix_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let prefix = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let s = get_arg_resolved(ctx, args, 1);
+    let prefix = get_arg_resolved(ctx, args, 2);
     if let Some(stripped) = s.strip_prefix(&prefix) {
         Some(stripped.to_string())
     } else {
@@ -1383,13 +1388,33 @@ fn trim_prefix_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
 
 /// $删后缀 [字符串] [后缀]$ — 删除字符串末尾的匹配后缀
 fn trim_suffix_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let suffix = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let s = get_arg_resolved(ctx, args, 1);
+    let suffix = get_arg_resolved(ctx, args, 2);
     if let Some(stripped) = s.strip_suffix(&suffix) {
         Some(stripped.to_string())
     } else {
         Some(s)
     }
+}
+
+// ==================== 参数解析辅助函数 ====================
+
+/// 安全获取字符串参数，不存在时返回空字符串
+fn get_arg_str(args: &[String], index: usize) -> &str {
+    args.get(index).map(|s| s.as_str()).unwrap_or("")
+}
+
+/// 安全获取字符串参数并经过变量替换
+fn get_arg_resolved(ctx: &mut DicContext, args: &[String], index: usize) -> String {
+    ctx.val.text(get_arg_str(args, index))
+}
+
+/// 安全获取数值参数（usize），不存在或解析失败时返回 0
+fn get_arg_num(ctx: &DicContext, args: &[String], index: usize) -> usize {
+    args.get(index)
+        .map(|s| s.as_str())
+        .and_then(|s| resolve_num(ctx, s))
+        .unwrap_or(0)
 }
 
 /// 解析数值参数：先 %var% 替换，再 [expr] 求值，最后解析
@@ -1420,7 +1445,7 @@ fn ensure_http(mut url: String) -> String {
 // ===== 创建访问 url$ — 创建请求对象，返回 *指针 =====
 
 fn create_access_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let url = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let url = get_arg_resolved(ctx, args, 1);
     if url.is_empty() {
         return Some(format!("[错误] {} 创建访问 需要 URL", ctx.sys.file_location()));
     }
@@ -1716,7 +1741,7 @@ fn request_content_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> 
 // ===== 访问 url [headers_json]$ — 快捷 GET 请求 =====
 
 fn access_get_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let url = ensure_http(ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or("")));
+    let url = ensure_http(get_arg_resolved(ctx, args, 1));
     if url.is_empty() || url == "http://" {
         return Some(format!("[错误] {} 访问 需要 URL", ctx.sys.file_location()));
     }
@@ -1755,8 +1780,8 @@ fn access_get_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Optio
 // ===== 访问POST url body [headers_json]$ — 快捷 POST 请求 =====
 
 fn access_post_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let url = ensure_http(ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or("")));
-    let body = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let url = ensure_http(get_arg_resolved(ctx, args, 1));
+    let body = get_arg_resolved(ctx, args, 2);
     if url.is_empty() || url == "http://" {
         return Some(format!("[错误] {} 访问POST 需要 URL", ctx.sys.file_location()));
     }
@@ -1800,7 +1825,7 @@ fn access_post_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
 // ===== 访问转发 url$ — 将当前 HTTP 请求转发到目标 URL =====
 
 fn request_forward_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let target_url = ensure_http(ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or("")));
+    let target_url = ensure_http(get_arg_resolved(ctx, args, 1));
     if target_url.is_empty() || target_url == "http://" {
         return Some(format!("[错误] {} 访问转发 需要 URL", ctx.sys.file_location()));
     }
@@ -1973,15 +1998,15 @@ fn round_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Str
 
 /// $文本包含 字符串 子串$ — 判断是否包含，返回 1/0
 fn contains_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let sub = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let s = get_arg_resolved(ctx, args, 1);
+    let sub = get_arg_resolved(ctx, args, 2);
     Some(if s.contains(&sub) { "1" } else { "0" }.to_string())
 }
 
 /// $文本分割 字符串 分隔符$ — 按分隔符分割，返回第一段（多段用 %文本分割.1% 后续）
 fn split_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let sep = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let s = get_arg_resolved(ctx, args, 1);
+    let sep = get_arg_resolved(ctx, args, 2);
     let parts: Vec<&str> = s.split(&sep).collect();
     let index: usize = args.get(3)
         .and_then(|a| resolve_num(ctx, a))
@@ -2028,8 +2053,8 @@ fn lower_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Str
 
 /// $查找 字符串 子串$ — 查找子串位置（0-based），找不到返回 "-1"
 fn find_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let sub = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let s = get_arg_resolved(ctx, args, 1);
+    let sub = get_arg_resolved(ctx, args, 2);
     let start: usize = args.get(3)
         .and_then(|a| resolve_num(ctx, a))
         .unwrap_or(0);
@@ -2043,8 +2068,8 @@ fn find_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Stri
 
 /// $计数 字符串 子串$ — 统计子串出现次数
 fn count_sub_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let sub = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let s = get_arg_resolved(ctx, args, 1);
+    let sub = get_arg_resolved(ctx, args, 2);
     let count = s.matches(&sub).count();
     Some(count.to_string())
 }
@@ -2053,15 +2078,15 @@ fn count_sub_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option
 
 /// $开头判断 字符串 前缀$ — 判断是否以指定前缀开头，返回 1/0
 fn starts_with_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let prefix = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let s = get_arg_resolved(ctx, args, 1);
+    let prefix = get_arg_resolved(ctx, args, 2);
     Some(if s.starts_with(&prefix) { "1" } else { "0" }.to_string())
 }
 
 /// $结尾判断 字符串 后缀$ — 判断是否以指定后缀结尾，返回 1/0
 fn ends_with_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let suffix = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let s = get_arg_resolved(ctx, args, 1);
+    let suffix = get_arg_resolved(ctx, args, 2);
     Some(if s.ends_with(&suffix) { "1" } else { "0" }.to_string())
 }
 
@@ -2115,7 +2140,7 @@ fn min_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Strin
 
 /// $文本连接 分隔符 文本1 文本2 ...$ — 用分隔符连接多个文本
 fn join_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let sep = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let sep = get_arg_resolved(ctx, args, 1);
     let parts: Vec<String> = args.iter().skip(2)
         .map(|a| ctx.val.text(a))
         .collect();
@@ -2124,7 +2149,7 @@ fn join_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Stri
 
 /// $文本重复 文本 次数$ — 将文本重复指定次数
 fn repeat_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let s = get_arg_resolved(ctx, args, 1);
     let n: usize = args.get(2)
         .and_then(|a| resolve_num(ctx, a))
         .unwrap_or(1);
@@ -2210,7 +2235,7 @@ struct AlignArgs {
 }
 
 fn parse_align_args(ctx: &mut DicContext, args: &[String]) -> AlignArgs {
-    let s = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let s = get_arg_resolved(ctx, args, 1);
     let width: usize = args.get(2)
         .and_then(|a| resolve_num(ctx, a))
         .unwrap_or(0);
@@ -2259,8 +2284,8 @@ fn center_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<St
 
 /// Python pow(base, exp) — 幂运算
 fn pow_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let text_base = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let text_exp = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let text_base = get_arg_resolved(ctx, args, 1);
+    let text_exp = get_arg_resolved(ctx, args, 2);
     let base: f64 = text_base.trim().parse::<f64>().unwrap_or(0.0);
     let exp: f64 = text_exp.trim().parse::<f64>().unwrap_or(1.0);
     let result = base.powf(exp);
@@ -2303,7 +2328,7 @@ fn floor_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Str
 
 /// Python math.sqrt(x) — 返回平方根
 fn sqrt_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let text = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let text = get_arg_resolved(ctx, args, 1);
     let n: f64 = text.trim().parse::<f64>().unwrap_or(0.0);
     if n < 0.0 {
         return Some(String::new());
@@ -2313,7 +2338,7 @@ fn sqrt_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<Stri
 
 /// 返回 0..max 的随机整数；不传参数则返回 0..1 的随机浮点数
 fn random_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let max_str = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let max_str = get_arg_resolved(ctx, args, 1);
     if max_str.is_empty() {
         // 返回 0~1 之间的随机浮点数
         let r = simple_rand(1_000_000) as f64 / 1_000_000.0;
@@ -2736,8 +2761,8 @@ fn is_leap_year(y: i64) -> bool {
 
 /// $写文件 路径 内容$ — 将内容写入文件
 fn write_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let data = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let path = get_arg_resolved(ctx, args, 1);
+    let data = get_arg_resolved(ctx, args, 2);
     if path.is_empty() {
         return Some(format!("[错误] {} 写文件 需要路径", ctx.sys.file_location()));
     }
@@ -2753,8 +2778,8 @@ fn write_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -
 
 /// $读文件 路径 [默认值]$ — 读取整个文件内容，失败时返回默认值
 fn read_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let default = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let path = get_arg_resolved(ctx, args, 1);
+    let default = get_arg_resolved(ctx, args, 2);
     if path.is_empty() {
         return Some(default);
     }
@@ -2772,9 +2797,9 @@ fn read_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) ->
 /// $写 路径 键 值$ — 将键值对写入指定路径的键值文件
 /// 文件格式：首行为更新时间，后续每行为 key=value
 fn write_key_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let key = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let subkey = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
-    let value = ctx.val.text(args.get(3).map(|s| s.as_str()).unwrap_or(""));
+    let key = get_arg_resolved(ctx, args, 1);
+    let subkey = get_arg_resolved(ctx, args, 2);
+    let value = get_arg_resolved(ctx, args, 3);
     if key.is_empty() {
         return Some(format!("[错误] {} 写 需要路径参数", ctx.sys.file_location()));
     }
@@ -2818,7 +2843,7 @@ fn write_key_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &st
 /// $读 路径 [键] [默认值]$ — 读取指定路径的键值文件
 /// 不传键时返回全部键值对的 JSON 数组；传键时查找对应值，未找到返回默认值
 fn read_key_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let key = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let key = get_arg_resolved(ctx, args, 1);
     if key.is_empty() {
         return Some("[]".to_string());
     }
@@ -2828,7 +2853,7 @@ fn read_key_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str
         Ok(s) => s,
         Err(_) => {
             if args.len() >= 4 {
-                return Some(ctx.val.text(args.get(3).map(|s| s.as_str()).unwrap_or("")));
+                return Some(get_arg_resolved(ctx, args, 3));
             }
             return Some("[]".to_string());
         }
@@ -2847,7 +2872,7 @@ fn read_key_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str
         return Some(serde_json::Value::Array(result).to_string());
     }
     // 查找特定键
-    let subkey = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let subkey = get_arg_resolved(ctx, args, 2);
     for (i, line) in data.lines().enumerate() {
         if i == 0 { continue; }
         if let Some(eq_pos) = line.find('=') {
@@ -2858,14 +2883,14 @@ fn read_key_string_file_fn(ctx: &mut DicContext, args: &[String], _content: &str
             }
         }
     }
-    Some(ctx.val.text(args.get(3).map(|s| s.as_str()).unwrap_or("")))
+    Some(get_arg_resolved(ctx, args, 3))
 }
 
 // ==================== 更多文件操作 ====================
 
 /// $删除文件 路径$ — 删除文件
 fn delete_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let path = get_arg_resolved(ctx, args, 1);
     if path.is_empty() { return None; }
     let path_buf = std::path::PathBuf::from(&path);
     file_lock::with_file_write(&path_buf, || {
@@ -2879,7 +2904,7 @@ fn delete_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
 
 /// $删除文件夹 路径$ — 删除文件夹及其所有内容
 fn delete_dir_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let path = get_arg_resolved(ctx, args, 1);
     if path.is_empty() { return None; }
     let path_buf = std::path::PathBuf::from(&path);
     file_lock::with_file_write(&path_buf, || {
@@ -2893,7 +2918,7 @@ fn delete_dir_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Optio
 
 /// $存在文件 路径$ — 判断是否为已存在的文件，返回 true/false
 fn file_exist_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let path = get_arg_resolved(ctx, args, 1);
     let path_buf = std::path::PathBuf::from(&path);
     let exists = file_lock::with_file_read(&path_buf, || {
         std::fs::metadata(&path).map(|m| m.is_file()).unwrap_or(false)
@@ -2903,7 +2928,7 @@ fn file_exist_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Optio
 
 /// $存在文件夹 路径$ — 判断是否为已存在的文件夹，返回 true/false
 fn dir_exist_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let path = get_arg_resolved(ctx, args, 1);
     let path_buf = std::path::PathBuf::from(&path);
     let exists = file_lock::with_file_read(&path_buf, || {
         std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false)
@@ -2913,7 +2938,7 @@ fn dir_exist_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option
 
 /// $存在文件或文件夹 路径$ — 判断路径是否存在，返回 true/false
 fn file_or_dir_exist_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let path = get_arg_resolved(ctx, args, 1);
     let path_buf = std::path::PathBuf::from(&path);
     let exists = file_lock::with_file_read(&path_buf, || {
         std::path::Path::new(&path).exists()
@@ -2923,7 +2948,7 @@ fn file_or_dir_exist_fn(ctx: &mut DicContext, args: &[String], _content: &str) -
 
 /// $文件后缀 路径$ — 获取文件扩展名，含前导点
 fn file_suffix_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let path = get_arg_resolved(ctx, args, 1);
     let ext = std::path::Path::new(&path)
         .extension()
         .map(|e| format!(".{}", e.to_string_lossy()))
@@ -2933,7 +2958,7 @@ fn file_suffix_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
 
 /// $文件头部 路径或后缀$ — 根据文件后缀返回 Content-Type 头部
 fn file_header_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let path = get_arg_resolved(ctx, args, 1);
     let ext = std::path::Path::new(&path)
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
@@ -3016,10 +3041,10 @@ fn simple_rand(max: usize) -> usize {
 /// $读文件行 路径 起始行 数量 [默认值]$ — 从起始行开始读取指定数量的行，返回 JSON 数组
 /// 起始行和数量均为 1-based
 fn read_file_lines_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let path = get_arg_resolved(ctx, args, 1);
     let start: usize = args.get(2).and_then(|a| resolve_num(ctx, a)).unwrap_or(1).max(1);
     let count: usize = args.get(3).and_then(|a| resolve_num(ctx, a)).unwrap_or(1).max(1);
-    let default = ctx.val.text(args.get(4).map(|s| s.as_str()).unwrap_or(""));
+    let default = get_arg_resolved(ctx, args, 4);
     let path_buf = std::path::PathBuf::from(&path);
     let content = match file_lock::with_file_read(&path_buf, || std::fs::read_to_string(&path)) {
         Ok(s) => s,
@@ -3037,7 +3062,7 @@ fn read_file_lines_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> 
 
 /// $文件夹列表 [路径]$ — 列出目录下的文件夹名，返回 JSON 数组
 fn dir_list_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let path = get_arg_resolved(ctx, args, 1);
     let path_buf = std::path::PathBuf::from(&path);
     let dirs: Vec<serde_json::Value> = match file_lock::with_file_read(&path_buf, || std::fs::read_dir(&path)) {
         Ok(entries) => entries
@@ -3052,7 +3077,7 @@ fn dir_list_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<
 
 /// $文件列表 [路径]$ — 列出目录下的文件名，返回 JSON 数组
 fn file_list_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let path = get_arg_resolved(ctx, args, 1);
     let path_buf = std::path::PathBuf::from(&path);
     let files: Vec<serde_json::Value> = match file_lock::with_file_read(&path_buf, || std::fs::read_dir(&path)) {
         Ok(entries) => entries
@@ -3067,7 +3092,7 @@ fn file_list_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option
 
 /// $随机文件夹名 [路径]$ — 随机返回目录下的一个文件夹名
 fn random_dir_name_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let path = get_arg_resolved(ctx, args, 1);
     let path_buf = std::path::PathBuf::from(&path);
     let mut dirs: Vec<String> = match file_lock::with_file_read(&path_buf, || std::fs::read_dir(&path)) {
         Ok(entries) => entries
@@ -3084,7 +3109,7 @@ fn random_dir_name_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> 
 
 /// $随机文件名 [路径]$ — 随机返回目录下的一个文件名
 fn random_file_name_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let path = get_arg_resolved(ctx, args, 1);
     let path_buf = std::path::PathBuf::from(&path);
     let mut files: Vec<String> = match file_lock::with_file_read(&path_buf, || std::fs::read_dir(&path)) {
         Ok(entries) => entries
@@ -3101,7 +3126,7 @@ fn random_file_name_fn(ctx: &mut DicContext, args: &[String], _content: &str) ->
 
 /// $文件夹大小 路径$ — 递归计算目录总大小（字节）
 fn dir_size_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let path = get_arg_resolved(ctx, args, 1);
     let path_buf = std::path::PathBuf::from(&path);
     let size = file_lock::with_file_read(&path_buf, || dir_calc_size(std::path::Path::new(&path)));
     Some(size.to_string())
@@ -3122,7 +3147,7 @@ fn dir_calc_size(path: &std::path::Path) -> u64 {
 
 /// $文件大小 路径$ — 获取文件大小（字节）
 fn file_size_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let path = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    let path = get_arg_resolved(ctx, args, 1);
     let path_buf = std::path::PathBuf::from(&path);
     let size = file_lock::with_file_read(&path_buf, || {
         std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
@@ -3132,8 +3157,8 @@ fn file_size_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option
 
 /// $重命名 原路径 新路径$ — 重命名文件或文件夹，返回 true/false
 fn file_rename_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let src = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let dst = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let src = get_arg_resolved(ctx, args, 1);
+    let dst = get_arg_resolved(ctx, args, 2);
     if src.is_empty() || dst.is_empty() { return Some("false".to_string()); }
     let dst_buf = std::path::PathBuf::from(&dst);
     let ok = file_lock::with_file_write(&dst_buf, || std::fs::rename(&src, &dst).is_ok());
@@ -3142,8 +3167,8 @@ fn file_rename_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Opti
 
 /// $复制粘贴 原路径 目标路径$ — 复制文件或文件夹，返回 true/false
 fn file_copy_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let src = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let dst = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let src = get_arg_resolved(ctx, args, 1);
+    let dst = get_arg_resolved(ctx, args, 2);
     if src == dst || src.is_empty() || dst.is_empty() { return Some("false".to_string()); }
     let dst_buf = std::path::PathBuf::from(&dst);
     let ok = file_lock::with_file_write(&dst_buf, || {
@@ -3172,8 +3197,8 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
 
 /// $下载文件 下载地址 保存路径$ — 从 URL 下载文件到本地
 fn download_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let url = ctx.val.text(args.get(1).map(|s| s.as_str()).unwrap_or(""));
-    let save_path = ctx.val.text(args.get(2).map(|s| s.as_str()).unwrap_or(""));
+    let url = get_arg_resolved(ctx, args, 1);
+    let save_path = get_arg_resolved(ctx, args, 2);
     if url.is_empty() || save_path.is_empty() {
         return Some(String::new());
     }

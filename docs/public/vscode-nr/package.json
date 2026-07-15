@@ -10,7 +10,11 @@
   "engines": {
     "vscode": "^1.75.0"
   },
-  "categories": ["Programming Languages"],
+  "categories": ["Programming Languages", "Debuggers"],
+  "activationEvents": [
+    "onLanguage:nr",
+    "onDebug"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/nebula/nr-language"
@@ -52,6 +56,61 @@
           { "label": "数学.", "detail": "数学运算（内置）", "kind": 8 },
           { "label": "访问.", "detail": "HTTP 网络访问（内置）", "kind": 8 },
           { "label": "画布.", "detail": "像素级图像绘制（内置）", "kind": 8 }
+        ]
+      }
+    ],
+    "breakpoints": [
+      {
+        "language": "nr"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "nr-debug",
+        "label": "NR Debug",
+        "languages": ["nr"],
+        "configurationAttributes": {
+          "launch": {
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "NR 脚本文件路径",
+                "default": "${file}"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "是否在入口处自动暂停",
+                "default": false
+              },
+              "nebulaPath": {
+                "type": "string",
+                "description": "nebula 可执行文件路径（默认使用 PATH 中的 nebula）",
+                "default": "nebula"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "nr-debug",
+            "name": "NR: 调试当前脚本",
+            "request": "launch",
+            "program": "${file}",
+            "stopOnEntry": false
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "NR: 调试脚本",
+            "description": "启动 NR 脚本调试",
+            "body": {
+              "type": "nr-debug",
+              "request": "launch",
+              "name": "NR 调试",
+              "program": "^\"${1:${file}}\"",
+              "stopOnEntry": false
+            }
+          }
         ]
       }
     ]

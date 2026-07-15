@@ -2,6 +2,7 @@ mod analyzer;
 mod ast;
 mod canvas;
 mod count;
+mod dap;
 mod executor;
 mod file_lock;
 mod functions;
@@ -98,6 +99,7 @@ fn main() {
     let mut do_update = false;
     let mut asset_filter = String::new();
     let mut interactive = false;
+    let mut dap_mode = false;
     let mut file_path: Option<&str> = None;
 
     // 简单的手动参数解析
@@ -114,6 +116,13 @@ fn main() {
                 i += 1;
                 if i < args.len() {
                     asset_filter = args[i].clone();
+                }
+            }
+            "--debug" => {
+                dap_mode = true;
+                i += 1;
+                if i < args.len() {
+                    file_path = Some(&args[i]);
                 }
             }
             "-i" => {
@@ -148,11 +157,20 @@ fn main() {
         return;
     }
 
+    // DAP 模式：文件路径可选（可通过 launch 请求传入）
+    if dap_mode {
+        if let Err(e) = dap::run_dap_server(file_path) {
+            eprintln!("\x1b[31m{}\x1b[0m", e);
+        }
+        return;
+    }
+
     let file_path = match file_path {
         Some(p) => p,
         None => {
             eprintln!("用法: {} <文件路径>", exe_name);
             eprintln!("      {} -i <文件路径>  (交互模式)", exe_name);
+            eprintln!("      {} --debug [文件路径]  (DAP 调试模式)", exe_name);
             eprintln!("      {} --help          (帮助)", exe_name);
             return;
         }

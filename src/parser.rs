@@ -47,6 +47,8 @@ pub struct BuildValue {
     pub trigger_source: HashMap<String, String>,
     /// 标准库模块名（如 "画布"），None 表示非标准库包
     pub stdlib_module: Option<String>,
+    /// 源码文件路径（调试时用于断点匹配和光标定位）
+    pub source_file: String,
 }
 
 impl BuildValue {
@@ -60,6 +62,7 @@ impl BuildValue {
             sub_packages: HashMap::new(),
             trigger_source: HashMap::new(),
             stdlib_module: None,
+            source_file: String::new(),
         }
     }
 }
@@ -287,7 +290,7 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
                             } else {
                                 match file_lock::with_file_read(std::path::Path::new(&final_path), || fs::read_to_string(&final_path)) {
                                     Ok(file_data) => {
-                                        let parsed = build_dic(_dic_path, &file_data)?;
+                                        let parsed = build_dic(&final_path, &file_data)?;
                                         cache.insert(cache_key, parsed.clone());
                                         Some(parsed)
                                     }
@@ -514,6 +517,20 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
         }
     }
 
+    // 规范化源文件路径为绝对路径（调试时用于断点匹配）
+    let source_file = std::path::Path::new(_dic_path)
+        .canonicalize()
+        .map(|p| {
+            let s = p.to_string_lossy().to_string();
+            // 去除 Windows \\?\ 前缀
+            if cfg!(windows) {
+                s.strip_prefix("\\\\?\\").unwrap_or(&s).to_string()
+            } else {
+                s
+            }
+        })
+        .unwrap_or_else(|_| _dic_path.to_string());
+
     Ok(BuildValue {
         head: runheadtext,
         dic: dic_text,
@@ -523,6 +540,7 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
         sub_packages: HashMap::new(),
         trigger_source: HashMap::new(),
         stdlib_module: None,
+        source_file,
     })
 }
 

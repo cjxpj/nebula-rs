@@ -26,6 +26,11 @@ use crate::functions::parse_param_defs;
 use crate::functions::fuzzy_search_pkg_method;
 use crate::interpreter::DicContext;
 
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use crate::dap::{self, DebugCommand, DebugEvent, SharedDebugState, StackFrame};
+use crate::interpreter::Nebula;
+
 /* ===================== 执行结果 ===================== */
 
 /// 语句块执行结果
@@ -983,6 +988,901 @@ fn find_op_outside_parens(chars: &[char], ops: &[char], _right_to_left: bool) ->
 pub fn exec_stmts(ctx: &mut DicContext, stmts: &[Stmt]) -> ExecResult {
     let global_labels = collect_all_labels(stmts);
     exec_stmts_impl(ctx, stmts, &global_labels)
+}
+
+/* ===================== 调试模式执行器 ===================== */
+
+/// 调试模式入口：加载 Nebula 脚本并启动调试执行
+pub fn run_debug_executor(
+    mut nb: Nebula,
+    shared: Arc<Mutex<SharedDebugState>>,
+    event_tx: Sender<DebugEvent>,
+    cmd_rx: Receiver<DebugCommand>,
+) {
+    nb.ctx.debug_mode = true; // 禁止 println! 污染 DAP stdout 协议通道
+    nb.load();
+
+    // 调试模式：不调用 exec_init()，因为它走的是非 debug 路径的 entry()，
+    // 断点检查不会生效。改为手动取 init_lines，用 debug 路径执行。
+    let init_lines = std::mem::take(&mut Arc::make_mut(&mut nb.ctx.shared).init_lines);
+    // 行偏移：build.head 中 #引入 行被跳过，但包头部行会插入到 init_lines 中，
+    // 所以对紧跟 #引入 行的语句来说偏移为 0（包头行恰好占据被跳过的位置）。
+    nb.ctx.sys.line_offset = 0;
+
+    // 等待 launch 完成后的 configurationDone Continue 命令
+    match cmd_rx.recv() {
+        Ok(DebugCommand::Continue) | Ok(DebugCommand::StepIn) => {}
+        _ => {
+            let _ = event_tx.send(DebugEvent::Terminated);
+            return;
+        }
+    }
+
+    // 用 debug 路径执行入口代码（init_lines 包含主文件 + 引入包的头部可执行行）
+    if !init_lines.is_empty() {
+        // 初始化调用栈
+        {
+            let mut ds = shared.lock().unwrap();
+            ds.current_file = nb.ctx.sys.source_file.clone();
+            ds.depth = 0;
+            ds.call_stack = vec![StackFrame {
+                id: 0,
+                name: "main".to_string(),
+                file: ds.current_file.clone(),
+                line: 0,
+            }];
+        }
+        let result = exec_stmts_with_debug(&mut nb.ctx, &init_lines, &shared, &event_tx, &cmd_rx, 0);
+        if matches!(result, ExecResult::Stop) {
+            let _ = event_tx.send(DebugEvent::Terminated);
+            return;
+        }
+    }
+
+    // 检查是否有 [f]main 函数，有则用 debug 路径执行
+    exec_main_with_debug_handler(&mut nb.ctx, &shared, &event_tx, &cmd_rx);
+
+    // 输出已在 exec_func_call_debug / exec_stmts_impl_debug 中实时发送，
+    // 不再发送累积输出（否则会重复发送 Stmt::Output 和函数返回值）
+    let _ = event_tx.send(DebugEvent::Terminated);
+}
+
+/// 调试模式下查找并执行 main 函数
+fn exec_main_with_debug_handler(
+    ctx: &mut DicContext,
+    shared: &Arc<Mutex<SharedDebugState>>,
+    event_tx: &Sender<DebugEvent>,
+    cmd_rx: &Receiver<DebugCommand>,
+) {
+    let main_info =
+        ctx.find_func_prefix("main")
+            .or_else(|| ctx.find_internal("main").map(|code| (code, Vec::new(), Vec::new(), false, 0)));
+
+    let (code, line_offset) = match main_info {
+        Some((code, _, _, _, func_line)) => (code, func_line),
+        None => return,
+    };
+
+    ctx.sys.line_offset = line_offset;
+
+    {
+        let mut ds = shared.lock().unwrap();
+        ds.current_file = ctx.sys.source_file.clone();
+        ds.depth = 0;
+        ds.call_stack = vec![StackFrame {
+            id: 0,
+            name: "main".to_string(),
+            file: ds.current_file.clone(),
+            line: line_offset,
+        }];
+    }
+
+    exec_stmts_with_debug(ctx, &code, shared, event_tx, cmd_rx, 0);
+}
+
+/// 执行 AST 语句列表（调试模式，在每条语句前检查断点/步进）
+pub fn exec_stmts_with_debug(
+    ctx: &mut DicContext,
+    code: &[String],
+    shared: &Arc<Mutex<SharedDebugState>>,
+    event_tx: &Sender<DebugEvent>,
+    cmd_rx: &Receiver<DebugCommand>,
+    depth: usize,
+) -> ExecResult {
+    let stmts = match parse_stmts(code, false, ctx.sys.line_offset, &ctx.sys.source_file) {
+        Ok(s) => s,
+        Err(e) => {
+            ctx.output.add(&e);
+            return ExecResult::Continue;
+        }
+    };
+    let global_labels = collect_all_labels(&stmts);
+    exec_stmts_impl_debug(ctx, &stmts, &global_labels, shared, event_tx, cmd_rx, depth)
+}
+
+/// 递归执行器（调试模式）
+fn exec_stmts_impl_debug(
+    ctx: &mut DicContext,
+    stmts: &[Stmt],
+    global_labels: &std::collections::HashMap<String, isize>,
+    shared: &Arc<Mutex<SharedDebugState>>,
+    event_tx: &Sender<DebugEvent>,
+    cmd_rx: &Receiver<DebugCommand>,
+    depth: usize,
+) -> ExecResult {
+    use std::collections::HashMap;
+    let mut idx: isize = 0;
+    let len = stmts.len() as isize;
+    let file = ctx.sys.source_file.clone();
+
+    // 预扫描本地标签
+    let mut labels: HashMap<String, isize> = HashMap::new();
+    for (i, stmt) in stmts.iter().enumerate() {
+        if let Stmt::Label(name) = stmt {
+            labels.insert(name.clone(), i as isize);
+        }
+    }
+
+    if ctx.sys.stop {
+        return ExecResult::Stop;
+    }
+
+    // 构建调用栈
+    let _func_name = ctx.val.p.get_cloned("self");
+    let call_stack: Vec<StackFrame> = {
+        let ds = shared.lock().unwrap();
+        ds.call_stack.clone()
+    };
+    // 调用栈已在外层管理，此处不重复 push
+
+    while idx >= 0 && idx < len {
+        // 计算行号
+        let line = ctx.sys.line_offset + (idx as usize);
+
+        // 收集变量快照（过滤内部变量，先收集全局变量 g 再覆盖本地变量 p）
+        let mut vars: HashMap<String, String> = ctx.val.g.get_all()
+            .iter()
+            .filter(|(k, _)| !is_internal_variable(k))
+            .map(|(k, v)| (k.clone(), v.display()))
+            .collect();
+        for (k, v) in ctx.val.p.get_all().iter() {
+            if !is_internal_variable(k) {
+                vars.insert(k.clone(), v.display());
+            }
+        }
+
+        // 调试检查
+        if !dap::check_debug_before_exec(
+            shared, event_tx, cmd_rx, &file, line, depth, &vars, &call_stack,
+        ) {
+            return ExecResult::Stop;
+        }
+
+        let stmt = &stmts[idx as usize];
+
+        match stmt {
+            Stmt::Output(text) => {
+                // 计算最终文本（复用 exec_output 的核心逻辑）
+                let text_with_vars = ctx.val.text(text);
+                let text_with_funcs = ctx.run_internal_text(&text_with_vars);
+                let final_text = count::run_count_text(&ctx.val, &text_with_funcs);
+                let final_text = strip_n_marker(&final_text);
+                let final_text = final_text.replace('\x01', "");
+                let display = crate::analyzer::unescape_newline(&final_text);
+                ctx.output.add(&display);
+                // 调试模式下同时发送到调试控制台
+                let _ = event_tx.send(DebugEvent::Output(display));
+            }
+            Stmt::Assign { target, op, expr } => {
+                exec_assign(ctx, target, op, expr);
+            }
+            Stmt::Loop { var, count, condition, cached_tokens, body } => {
+                let result = exec_loop_debug(
+                    ctx, var, count, condition, cached_tokens, body,
+                    global_labels, shared, event_tx, cmd_rx, depth + 1,
+                );
+                match result {
+                    ExecResult::Stop => return ExecResult::Stop,
+                    ExecResult::Skip => return ExecResult::Skip,
+                    ExecResult::Goto(target) => {
+                        idx = target;
+                        continue;
+                    }
+                    ExecResult::Continue => {}
+                }
+            }
+            Stmt::If { conds, cached_tokens, branches, else_branch } => {
+                let result = exec_if_debug(
+                    ctx, conds, cached_tokens, branches, else_branch,
+                    global_labels, shared, event_tx, cmd_rx, depth + 1,
+                );
+                match result {
+                    ExecResult::Stop => return ExecResult::Stop,
+                    ExecResult::Skip => return ExecResult::Skip,
+                    ExecResult::Goto(target) => {
+                        idx = target;
+                        continue;
+                    }
+                    ExecResult::Continue => {}
+                }
+            }
+            Stmt::ForEach { var, array, body } => {
+                let result = exec_foreach_debug(
+                    ctx, var, array, body,
+                    global_labels, shared, event_tx, cmd_rx, depth + 1,
+                );
+                match result {
+                    ExecResult::Stop => return ExecResult::Stop,
+                    ExecResult::Skip => return ExecResult::Skip,
+                    ExecResult::Goto(target) => {
+                        idx = target;
+                        continue;
+                    }
+                    ExecResult::Continue => {}
+                }
+            }
+            Stmt::FuncCall { name, args } => {
+                let result = exec_func_call_debug(
+                    ctx, name, args,
+                    global_labels, &labels,
+                    shared, event_tx, cmd_rx, depth + 1,
+                );
+                match result {
+                    ExecResult::Stop => return ExecResult::Stop,
+                    ExecResult::Skip => return ExecResult::Skip,
+                    ExecResult::Goto(target) => {
+                        idx = target;
+                        continue;
+                    }
+                    ExecResult::Continue => {}
+                }
+            }
+            Stmt::Label(_) => {}
+            Stmt::Goto(label) => {
+                if let Some(&target) = labels.get(label) {
+                    if target >= 0 && target < len {
+                        idx = target;
+                        continue;
+                    }
+                }
+                if let Some(&target) = global_labels.get(label) {
+                    return ExecResult::Goto(target);
+                }
+                if let Some(&(target, goto_depth)) = ctx.sys.external_labels.get(label) {
+                    ctx.sys.pending_goto = Some((target, goto_depth));
+                    return ExecResult::Stop;
+                }
+            }
+            Stmt::Skip => return ExecResult::Skip,
+            Stmt::BreakLoop => {
+                ctx.sys.for_state.jump = true;
+                return ExecResult::Continue;
+            }
+            Stmt::BreakForEach => {
+                ctx.sys.for_each.jump = true;
+                return ExecResult::Continue;
+            }
+            Stmt::Stop => return ExecResult::Stop,
+            Stmt::TextBlock { var, content } => {
+                if var.is_empty() {
+                    ctx.output.add(content);
+                } else {
+                    ctx.val.p.set_string(var, content.clone());
+                }
+            }
+            Stmt::AsyncOutput(text) => {
+                let text_with_vars = ctx.val.text(text);
+                let text_with_funcs = ctx.run_internal_text(&text_with_vars);
+                let final_text = count::run_count_text(&ctx.val, &text_with_funcs);
+                // 在调试模式下通过 event 输出
+                let _ = event_tx.send(DebugEvent::Output(final_text));
+            }
+        }
+
+        if let Some(msg) = ctx.sys.error.take() {
+            ctx.output.add(&msg);
+            let _ = event_tx.send(DebugEvent::Output(msg.clone()));
+            return ExecResult::Stop;
+        }
+
+        if ctx.sys.stop {
+            return ExecResult::Stop;
+        }
+
+        idx += 1;
+    }
+
+    ExecResult::Continue
+}
+
+/// 判断是否为内部变量（不应在调试器变量面板中显示）
+fn is_internal_variable(name: &str) -> bool {
+    // self / 触发 / 触发响应 — 函数调用内部引用
+    if name == "self" || name == "触发" || name == "触发响应" || name == "行数" {
+        return true;
+    }
+    // 参数0, 参数1, ... — 函数参数
+    if name.starts_with("参数") && name.len() > 6 {
+        let suffix = &name[6..]; // "参数" = 6 字节（UTF-8），确保字符边界正确
+        if suffix.chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    // 括号1, 括号2, ... — 正则捕获组
+    if name.starts_with("括号") && name.len() > 6 {
+        let suffix = &name[6..];
+        if suffix.chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    // * 前缀 — 内部指针变量
+    if name.starts_with('*') {
+        return true;
+    }
+    // . 前缀 — 实例字段（内部同步使用）
+    if name.starts_with('.') {
+        return true;
+    }
+    // 0x 前缀 — OOP 实例指针句柄（0x264c36a0f20.a 等）
+    if name.starts_with("0x") {
+        return true;
+    }
+    // _ 前缀 — 请求处理上下文变量（_路径, _GET, _POST, _头部, _DATA, _设置头部, _状态码）
+    if name.starts_with('_') {
+        return true;
+    }
+    false
+}
+
+/// 调试模式：循环执行
+fn exec_loop_debug(
+    ctx: &mut DicContext,
+    var: &str,
+    count: &Option<Expr>,
+    condition: &Option<Expr>,
+    cached_tokens: &Option<Vec<crate::iftext::Token>>,
+    body: &[Stmt],
+    global_labels: &std::collections::HashMap<String, isize>,
+    shared: &Arc<Mutex<SharedDebugState>>,
+    event_tx: &Sender<DebugEvent>,
+    cmd_rx: &Receiver<DebugCommand>,
+    depth: usize,
+) -> ExecResult {
+    if let Some(_cond_expr) = condition {
+        ctx.sys.for_state.is_for = true;
+        if let Some(tokens) = cached_tokens {
+            loop {
+                if !IfText::eval_cached(ctx, tokens) { break; }
+                let result = exec_stmts_impl_debug(ctx, body, global_labels, shared, event_tx, cmd_rx, depth);
+                handle_loop_result(ctx, result)
+            }
+        } else {
+            loop {
+                let cond_text = eval_cond_text(ctx, _cond_expr);
+                if !IfText::pd(ctx, &cond_text) { break; }
+                let result = exec_stmts_impl_debug(ctx, body, global_labels, shared, event_tx, cmd_rx, depth);
+                handle_loop_result(ctx, result)
+            }
+        }
+        ctx.sys.for_state.is_for = false;
+        return ExecResult::Continue;
+    }
+
+    let max_count = match count {
+        Some(expr) => match eval_expr(ctx, expr) {
+            Ok(val) => { let n = val.as_i64(); if n < 0 { 0 } else { n as usize } }
+            Err(e) => { ctx.sys.error = Some(e); 0 }
+        }
+        None => 0,
+    };
+
+    let mut i: usize = 1;
+    loop {
+        if max_count > 0 && i > max_count { break; }
+        if !var.is_empty() {
+            ctx.val.p.set_string(var, i.to_string());
+        }
+        ctx.sys.for_state.is_for = true;
+        let result = exec_stmts_impl_debug(ctx, body, global_labels, shared, event_tx, cmd_rx, depth);
+        handle_loop_result(ctx, result);
+        i += 1;
+    }
+    ctx.sys.for_state.is_for = false;
+    ExecResult::Continue
+}
+
+fn handle_loop_result(ctx: &mut DicContext, _result: ExecResult) {
+    if ctx.sys.for_state.jump {
+        ctx.sys.for_state.jump = false;
+    }
+}
+
+/// 调试模式：If 执行
+fn exec_if_debug(
+    ctx: &mut DicContext,
+    conds: &[Expr],
+    cached_tokens: &Option<Vec<Vec<crate::iftext::Token>>>,
+    branches: &[Vec<Stmt>],
+    else_branch: &Option<Vec<Stmt>>,
+    global_labels: &std::collections::HashMap<String, isize>,
+    shared: &Arc<Mutex<SharedDebugState>>,
+    event_tx: &Sender<DebugEvent>,
+    cmd_rx: &Receiver<DebugCommand>,
+    depth: usize,
+) -> ExecResult {
+    for (i, cond) in conds.iter().enumerate() {
+        let ifval = if let Some(tokens_list) = cached_tokens {
+            if let Some(tokens) = tokens_list.get(i) {
+                IfText::eval_cached(ctx, tokens)
+            } else {
+                let cond_text = eval_cond_text(ctx, cond);
+                IfText::pd(ctx, &cond_text)
+            }
+        } else {
+            let cond_text = eval_cond_text(ctx, cond);
+            IfText::pd(ctx, &cond_text)
+        };
+        if ifval {
+            if let Some(branch) = branches.get(i) {
+                return exec_stmts_impl_debug(ctx, branch, global_labels, shared, event_tx, cmd_rx, depth);
+            }
+            return ExecResult::Continue;
+        }
+    }
+    if let Some(else_body) = else_branch {
+        return exec_stmts_impl_debug(ctx, else_body, global_labels, shared, event_tx, cmd_rx, depth);
+    }
+    ExecResult::Continue
+}
+
+/// 调试模式：ForEach 执行
+fn exec_foreach_debug(
+    ctx: &mut DicContext,
+    var_spec: &str,
+    array_expr: &Expr,
+    body: &[Stmt],
+    global_labels: &std::collections::HashMap<String, isize>,
+    shared: &Arc<Mutex<SharedDebugState>>,
+    event_tx: &Sender<DebugEvent>,
+    cmd_rx: &Receiver<DebugCommand>,
+    depth: usize,
+) -> ExecResult {
+    let array_val = eval_expr(ctx, array_expr).unwrap_or(Value::Null);
+    let array_str = ctx.val.text(&array_val.display());
+    let final_str = count::run_count_text(&ctx.val, &array_str);
+
+    let (v1, v2) = if let Some(comma_pos) = var_spec.find(',') {
+        (var_spec[..comma_pos].to_string(), var_spec[comma_pos + 1..].to_string())
+    } else {
+        (var_spec.to_string(), String::from("_"))
+    };
+
+    let run_data: Option<serde_json::Value> = serde_json::from_str(&final_str).ok();
+    if let Some(run_data) = run_data {
+        let json_val_to_str = |val: &serde_json::Value| -> String {
+            match val { serde_json::Value::String(s) => s.clone(), other => other.to_string() }
+        };
+        let items: Vec<(String, String)> = match &run_data {
+            serde_json::Value::Array(arr) => {
+                arr.iter().enumerate().map(|(k, v)| (k.to_string(), json_val_to_str(v))).collect()
+            }
+            serde_json::Value::Object(map) => {
+                map.iter().map(|(k, v)| (k.clone(), json_val_to_str(v))).collect()
+            }
+            _ => vec![],
+        };
+        for (key, val) in items {
+            ctx.val.p.set_string(&v1, key);
+            ctx.val.p.set_string(&v2, val);
+            ctx.sys.for_each.is_for = true;
+            let result = exec_stmts_impl_debug(ctx, body, global_labels, shared, event_tx, cmd_rx, depth);
+            ctx.sys.for_each.is_for = false;
+            if result == ExecResult::Stop || ctx.sys.stop { return ExecResult::Stop; }
+            if ctx.sys.for_each.jump { ctx.sys.for_each.jump = false; break; }
+            if result == ExecResult::Skip { continue; }
+            if let ExecResult::Goto(target) = result { return ExecResult::Goto(target); }
+        }
+    }
+    ExecResult::Continue
+}
+
+/// 调试模式：FuncCall 执行
+fn exec_func_call_debug(
+    ctx: &mut DicContext,
+    name: &str,
+    args: &[String],
+    _global_labels: &std::collections::HashMap<String, isize>,
+    _local_labels: &std::collections::HashMap<String, isize>,
+    shared: &Arc<Mutex<SharedDebugState>>,
+    event_tx: &Sender<DebugEvent>,
+    cmd_rx: &Receiver<DebugCommand>,
+    depth: usize,
+) -> ExecResult {
+    // 预先解析参数中的变量引用
+    let resolved_args: Vec<String> = args.iter().map(|a| ctx.val.text(a)).collect();
+    let args: &[String] = &resolved_args;
+
+    // ===== $var:func$ 冒号语法：执行函数并将结果赋值给变量 =====
+    if let Some(colon_pos) = name.find(':') {
+        let var_name = &name[..colon_pos];
+        let func_name = &name[colon_pos + 1..];
+        if !var_name.is_empty() && !func_name.is_empty() && !func_name.contains(':') {
+            // 先查内置函数
+            if let Some(&builtin_fn) = ctx.shared.builtins.get(func_name) {
+                // 打印 / 打印返回 必须先拦截，不能调 builtin_fn，否则 println! 污染 DAP
+                if func_name == "打印" {
+                    let value = args.join(" ");
+                    let texted = ctx.val.text(&value);
+                    let result = crate::count::run_count_text(&ctx.val, &texted);
+                    let _ = event_tx.send(DebugEvent::Output(
+                        format!("{}\n", crate::analyzer::unescape_newline(&result)),
+                    ));
+                    return ExecResult::Continue;
+                }
+                if func_name == "打印返回" {
+                    let value = args.join(" ");
+                    let texted = ctx.val.text(&value);
+                    let result = crate::count::run_count_text(&ctx.val, &texted);
+                    let _ = event_tx.send(DebugEvent::Output(
+                        format!("{}\n", crate::analyzer::unescape_newline(&result)),
+                    ));
+                    ctx.val.p.set_string(var_name, result.clone());
+                    ctx.val.set_g_string(var_name, result);
+                    return ExecResult::Continue;
+                }
+                let all_args: Vec<String> = {
+                    let mut a = vec![func_name.to_string()];
+                    a.extend(args.iter().cloned());
+                    a
+                };
+                let content = if args.is_empty() {
+                    func_name.to_string()
+                } else {
+                    let mut s = func_name.to_string();
+                    for a in args {
+                        s.push(' ');
+                        s.push_str(a);
+                    }
+                    s
+                };
+                let out = builtin_fn(ctx, &all_args, &content);
+                if let Some(out) = out {
+                    ctx.val.p.set_string(var_name, out.clone());
+                    ctx.val.set_g_string(var_name, out);
+                }
+                return ExecResult::Continue;
+            }
+            // 非内置函数：查找本地函数并执行（含 find_func_prefix + find_internal）
+            let func_info = ctx.find_func_prefix(func_name)
+                .or_else(|| ctx.find_internal(func_name).map(|code| (code, Vec::new(), Vec::new(), false, 0)));
+            if let Some((code, _param_names, _defaults, _is_variadic, func_line)) = func_info {
+                let mut sub_ctx = ctx.fresh_sub_context();
+                sub_ctx.sys.line_offset = func_line;
+                sub_ctx.sys.source_file = ctx.sys.source_file.clone();
+                sub_ctx.val.p.set_string("self", func_name.to_string());
+                sub_ctx.val.p.set_string("触发", func_name.to_string());
+                sub_ctx.val.p.set_string("参数0", func_name.to_string());
+                for (i, arg) in args.iter().enumerate() {
+                    sub_ctx.val.p.set_string(&format!("参数{}", i + 1), arg.clone());
+                }
+                let parsed_stmts = match parse_stmts(&code, false, func_line, &ctx.sys.source_file) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        ctx.output.add(&e);
+                        return ExecResult::Continue;
+                    }
+                };
+                let func_labels = collect_all_labels(&parsed_stmts);
+                {
+                    let mut ds = shared.lock().unwrap();
+                    let frame_id = ds.call_stack.len();
+                    ds.call_stack.push(StackFrame {
+                        id: frame_id,
+                        name: func_name.to_string(),
+                        file: ctx.sys.source_file.clone(),
+                        line: func_line,
+                    });
+                }
+                let exec_result = exec_stmts_impl_debug(
+                    &mut sub_ctx, &parsed_stmts, &func_labels, shared, event_tx, cmd_rx, depth,
+                );
+                {
+                    let mut ds = shared.lock().unwrap();
+                    ds.call_stack.pop();
+                }
+                let out = sub_ctx.output.get();
+                if !out.is_empty() {
+                    ctx.val.p.set_string(var_name, out.clone());
+                    ctx.val.set_g_string(var_name, out);
+                }
+                return exec_result;
+            }
+        }
+    }
+
+    // ===== 解析 %var% 变量引用和 .method self 前缀 =====
+    let name_resolved: std::borrow::Cow<str>;
+    let name: &str = if name.len() > 2 && name.starts_with('%') && name.ends_with('%') {
+        name_resolved = std::borrow::Cow::Owned(ctx.val.text(name));
+        &name_resolved
+    } else if name.starts_with('.') && name.len() > 1 {
+        let self_class = ctx.val.p.get_cloned("self");
+        if !self_class.is_empty() {
+            let pure_class = crate::functions::pure_class_name(&self_class);
+            name_resolved = std::borrow::Cow::Owned(format!("{}{}", pure_class, name));
+            &name_resolved
+        } else {
+            name
+        }
+    } else {
+        name
+    };
+
+    // 先查内置函数（打印 / 打印返回 需特殊处理避免 println! 污染 DAP 协议通道）
+    if let Some(&builtin_fn) = ctx.shared.builtins.get(name) {
+        if name == "打印" {
+            // $打印 内容$ — 输出到调试控制台，不返回值
+            let value = args.join(" ");
+            let texted = ctx.val.text(&value);
+            let result = crate::count::run_count_text(&ctx.val, &texted);
+            let _ = event_tx.send(DebugEvent::Output(
+                format!("{}\n", crate::analyzer::unescape_newline(&result)),
+            ));
+            return ExecResult::Continue;
+        }
+        if name == "打印返回" {
+            // $打印返回 内容$ — 输出到调试控制台并返回值
+            let value = args.join(" ");
+            let texted = ctx.val.text(&value);
+            let result = crate::count::run_count_text(&ctx.val, &texted);
+            let _ = event_tx.send(DebugEvent::Output(
+                format!("{}\n", crate::analyzer::unescape_newline(&result)),
+            ));
+            ctx.output.add_string(result);
+            return ExecResult::Continue;
+        }
+        // 其他内置函数：调用并收集返回值
+        let all_args: Vec<String> = {
+            let mut a = vec![name.to_string()];
+            a.extend(args.iter().cloned());
+            a
+        };
+        let content = if args.is_empty() {
+            name.to_string()
+        } else {
+            let mut s = name.to_string();
+            for a in args {
+                s.push(' ');
+                s.push_str(a);
+            }
+            s
+        };
+        if let Some(output) = builtin_fn(ctx, &all_args, &content) {
+            let _ = event_tx.send(DebugEvent::Output(output.clone()));
+            ctx.output.add_string(output);
+        }
+        return ExecResult::Continue;
+    }
+
+    // ===== 支持 x.method 语法（包函数调用，如 $test.测试$） =====
+    if let Some(dot_pos) = name.find('.') {
+        let raw_obj = &name[..dot_pos];
+        let method = &name[dot_pos + 1..];
+        if !raw_obj.is_empty() && !method.is_empty() {
+            // 搜索包内函数
+            if let Some(pkg_bv) = ctx.shared.packages.get(raw_obj) {
+                let pfx = format!("{} ", method);
+                let cmt = format!("{}.{}", method, method);
+                // 搜索方法：构造函数 / 普通方法 / 静态方法
+                let found_pkg = crate::functions::search_pkg_ctor(pkg_bv, method)
+                    .map(|(text, line, ctor_name)| (text, Vec::new(), Vec::new(), false, line, ctor_name, raw_obj.to_string()));
+                let found_pkg = found_pkg.or_else(|| {
+                    for item in &pkg_bv.local_func {
+                        if item.trigger == cmt || item.trigger == method || item.trigger.starts_with(&pfx) {
+                            let (pnames, pdefaults, pvari) = if item.trigger == cmt {
+                                (Vec::new(), Vec::new(), false)
+                            } else if item.trigger.len() > method.len() + 1 {
+                                crate::functions::parse_param_defs(&item.trigger[method.len() + 1..])
+                            } else {
+                                (Vec::new(), Vec::new(), false)
+                            };
+                            return Some((item.text.clone(), pnames, pdefaults, pvari, item.line + 1, cmt.clone(), raw_obj.to_string()));
+                        }
+                    }
+                    None
+                });
+                let found_pkg = found_pkg.or_else(|| {
+                    for item in &pkg_bv.local_static {
+                        if item.trigger == cmt || item.trigger == method || item.trigger.starts_with(&pfx) {
+                            let (pnames, pdefaults, pvari) = if item.trigger == cmt {
+                                (Vec::new(), Vec::new(), false)
+                            } else if item.trigger.len() > method.len() + 1 {
+                                crate::functions::parse_param_defs(&item.trigger[method.len() + 1..])
+                            } else {
+                                (Vec::new(), Vec::new(), false)
+                            };
+                            return Some((item.text.clone(), pnames, pdefaults, pvari, item.line + 1, cmt.clone(), raw_obj.to_string()));
+                        }
+                    }
+                    None
+                });
+                let found_pkg = found_pkg.or_else(|| {
+                    crate::functions::fuzzy_search_pkg_method(pkg_bv, method).map(
+                        |(text, pnames, pdefaults, pvari, line)| (text, pnames, pdefaults, pvari, line, cmt, raw_obj.to_string()),
+                    )
+                });
+                if let Some((code, param_names, defaults, _is_variadic, func_line, _qualified, use_obj)) = found_pkg {
+                    let mut sub_ctx = ctx.fresh_sub_context();
+                    sub_ctx.sys.line_offset = func_line;
+
+                    // 注入包上下文
+                    if let Some(pkg_bv2) = ctx.shared.packages.get(&use_obj) {
+                        // 使用包自身的源文件路径（调试时用于断点匹配和光标定位）
+                        sub_ctx.sys.source_file = if pkg_bv2.source_file.is_empty() {
+                            ctx.sys.source_file.clone()
+                        } else {
+                            pkg_bv2.source_file.clone()
+                        };
+                        crate::functions::inject_pkg_context(&mut sub_ctx, pkg_bv2);
+                        crate::functions::process_pkg_head_vars(&ctx.val, &mut sub_ctx, pkg_bv2, Some(&use_obj));
+                    } else {
+                        sub_ctx.sys.source_file = ctx.sys.source_file.clone();
+                    }
+
+                    sub_ctx.val.p.set_string("self", use_obj.clone());
+                    sub_ctx.val.p.set_string("触发", name.to_string());
+                    sub_ctx.val.p.set_string("参数0", name.to_string());
+
+                    // 设置参数
+                    let arg_count = args.len();
+                    for i in 0..param_names.len() {
+                        let val = if i < arg_count {
+                            ctx.val.text(&args[i])
+                        } else if let Some(ref d) = defaults.get(i).and_then(|d| d.as_ref()) {
+                            ctx.val.p.resolve_default(d, !param_names.is_empty())
+                        } else {
+                            String::new()
+                        };
+                        sub_ctx.val.p.set_string(&param_names[i], val.clone());
+                        sub_ctx.val.p.set_string(&format!("参数{}", i + 1), val);
+                    }
+
+                    // 解析并执行函数体
+                    let parsed_stmts = match parse_stmts(&code, false, func_line, &sub_ctx.sys.source_file) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            ctx.output.add(&e);
+                            return ExecResult::Continue;
+                        }
+                    };
+                    let func_labels = collect_all_labels(&parsed_stmts);
+
+                    // 更新调用栈
+                    {
+                        let mut ds = shared.lock().unwrap();
+                        let frame_id = ds.call_stack.len();
+                        ds.call_stack.push(StackFrame {
+                            id: frame_id,
+                            name: name.to_string(),
+                            file: sub_ctx.sys.source_file.clone(),
+                            line: func_line + 1,
+                        });
+                    }
+
+                    let result = exec_stmts_impl_debug(&mut sub_ctx, &parsed_stmts, &func_labels, shared, event_tx, cmd_rx, depth);
+
+                    // 弹出调用栈
+                    {
+                        let mut ds = shared.lock().unwrap();
+                        ds.call_stack.pop();
+                    }
+
+                    if sub_ctx.sys.pending_goto.is_some() {
+                        ctx.sys.pending_goto = sub_ctx.sys.pending_goto.take();
+                        return result;
+                    }
+
+                    let out = sub_ctx.output.get();
+                    if !out.is_empty() {
+                        ctx.output.add_string(out);
+                    }
+                    return result;
+                }
+            }
+        }
+    }
+
+    // 查找本地函数代码
+    let found: Option<(Vec<String>, Vec<String>, Vec<Option<String>>, bool, usize)> = ctx
+        .find_func_prefix(name)
+        .or_else(|| ctx.find_internal(name).map(|code| (code, Vec::new(), Vec::new(), false, 0)))
+        .or_else(|| {
+            // [函数:ClassName]Method 前缀匹配（带参数定义）
+            let prefix = format!("{} ", name);
+            for item in &ctx.shared.local_static {
+                if item.trigger == name {
+                    return Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1));
+                }
+                if item.trigger.starts_with(&prefix) {
+                    let (param_names, defaults, is_variadic) = crate::functions::parse_param_defs(&item.trigger[prefix.len()..]);
+                    return Some((item.text.clone(), param_names, defaults, is_variadic, item.line + 1));
+                }
+            }
+            None
+        });
+
+    if let Some((code, param_names, defaults, _is_variadic, func_line)) = found {
+        let mut sub_ctx = ctx.fresh_sub_context();
+        sub_ctx.sys.line_offset = func_line;
+        sub_ctx.sys.source_file = ctx.sys.source_file.clone();
+        sub_ctx.val.p.set_string("self", name.to_string());
+        sub_ctx.val.p.set_string("触发", name.to_string());
+        sub_ctx.val.p.set_string("参数0", name.to_string());
+
+        // 解析函数代码为 AST
+        let parsed_stmts = match parse_stmts(&code, false, func_line, &ctx.sys.source_file) {
+            Ok(s) => s,
+            Err(e) => {
+                ctx.output.add(&e);
+                return ExecResult::Continue;
+            }
+        };
+        let func_labels = collect_all_labels(&parsed_stmts);
+
+        let arg_count = args.len();
+        for i in 0..param_names.len() {
+            let val = if i < arg_count {
+                ctx.val.text(&args[i])
+            } else if let Some(ref d) = defaults.get(i).and_then(|d| d.as_ref()) {
+                ctx.val.p.resolve_default(d, !param_names.is_empty())
+            } else {
+                String::new()
+            };
+            sub_ctx.val.p.set_string(&param_names[i], val.clone());
+            sub_ctx.val.p.set_string(&format!("参数{}", i + 1), val);
+        }
+
+        // 更新调用栈
+        {
+            let mut ds = shared.lock().unwrap();
+            let frame_id = ds.call_stack.len();
+            ds.call_stack.push(StackFrame {
+                id: frame_id,
+                name: name.to_string(),
+                file: ctx.sys.source_file.clone(),
+                line: func_line + 1,
+            });
+        }
+
+        let result = exec_stmts_impl_debug(&mut sub_ctx, &parsed_stmts, &func_labels, shared, event_tx, cmd_rx, depth);
+
+        // 弹出调用栈
+        {
+            let mut ds = shared.lock().unwrap();
+            ds.call_stack.pop();
+        }
+
+        // 回传 pending_goto
+        if sub_ctx.sys.pending_goto.is_some() {
+            ctx.sys.pending_goto = sub_ctx.sys.pending_goto.take();
+            return result;
+        }
+
+        let out = sub_ctx.output.get();
+        if !out.is_empty() {
+            ctx.output.add_string(out);
+        }
+        return result;
+    }
+
+    // 未找到函数 → 原样输出
+    let args_str = args.join(" ");
+    if args_str.is_empty() {
+        ctx.output.add_string(format!("${}$", name));
+    } else {
+        ctx.output.add_string(format!("${} {}$", name, args_str));
+    }
+    ExecResult::Continue
 }
 
 /// 递归收集所有标签（包括嵌套块中的标签），返回标签名 → 全局索引映射

@@ -253,6 +253,27 @@ pub fn parse_i32(s: &str) -> Option<i32> {
     s.trim().parse::<i32>().ok()
 }
 
+// ==================== 参数解析辅助函数 ====================
+
+/// 安全获取 f64 参数，不存在或解析失败时返回默认值
+fn get_arg_f64(args: &[String], index: usize, default: f64) -> f64 {
+    args.get(index)
+        .and_then(|s| parse_f64(s))
+        .unwrap_or(default)
+}
+
+/// 安全获取 i32 参数，不存在或解析失败时返回默认值
+fn get_arg_i32(args: &[String], index: usize, default: i32) -> i32 {
+    args.get(index)
+        .and_then(|s| parse_i32(s))
+        .unwrap_or(default)
+}
+
+/// 安全获取字符串参数
+fn get_arg_str(args: &[String], index: usize) -> &str {
+    args.get(index).map(|s| s.as_str()).unwrap_or("")
+}
+
 // ==================== 画布函数实现 ====================
 
 /// 创建画布 width height [bgColor]$
@@ -334,7 +355,7 @@ pub fn canvas_new(args: &[String]) -> Result<String, String> {
 /// 画布.获取 handle [format]$
 /// format: 默认返回 base64 PNG（对标 Go），支持 "png"/"jpg"/"jpeg"/"datauri"/"raw"
 pub fn canvas_get(args: &[String]) -> Result<String, String> {
-    let handle = args.get(1).map(|s| s.as_str()).unwrap_or("");
+    let handle = get_arg_str(args, 1);
     let format = args.get(2).map(|s| s.as_str()).unwrap_or("png").to_lowercase();
 
     let canvas = get_canvas(handle).ok_or("画布句柄无效")?;
@@ -382,7 +403,7 @@ pub fn canvas_get(args: &[String]) -> Result<String, String> {
 
 /// 解析画布句柄（从 args[1] 取）
 pub fn resolve_canvas(args: &[String]) -> Result<(String, CanvasData), String> {
-    let handle = args.get(1).map(|s| s.as_str()).unwrap_or("");
+    let handle = get_arg_str(args, 1);
     let canvas = get_canvas(handle).ok_or("画布句柄无效")?;
     Ok((handle.to_string(), canvas))
 }
@@ -420,7 +441,7 @@ pub fn brush_get_color(args: &[String]) -> Result<String, String> {
 /// 画笔.大小 handle size$
 pub fn brush_set_size(args: &[String]) -> Result<Option<String>, String> {
     let (handle, mut canvas) = resolve_canvas(args)?;
-    let size = args.get(2).and_then(|s| parse_f64(s)).unwrap_or(1.0);
+    let size = get_arg_f64(args, 2, 1.0);
     if size <= 0.0 {
         return Err("线条宽度必须大于0".into());
     }
@@ -434,8 +455,8 @@ pub fn brush_set_size(args: &[String]) -> Result<Option<String>, String> {
 /// 绘制.点 handle x y [color]$
 pub fn draw_point(args: &[String]) -> Result<Option<String>, String> {
     let (handle, mut canvas) = resolve_canvas(args)?;
-    let x: i32 = args.get(2).and_then(|s| parse_i32(s)).unwrap_or(0);
-    let y: i32 = args.get(3).and_then(|s| parse_i32(s)).unwrap_or(0);
+    let x: i32 = get_arg_i32(args, 2, 0);
+    let y: i32 = get_arg_i32(args, 3, 0);
     let c = get_draw_color(args, 4, &canvas);
 
     if canvas.in_bounds(x, y) {
@@ -448,10 +469,10 @@ pub fn draw_point(args: &[String]) -> Result<Option<String>, String> {
 /// 绘制.线 handle x1 y1 x2 y2 [color]$
 pub fn draw_line(args: &[String]) -> Result<Option<String>, String> {
     let (handle, mut canvas) = resolve_canvas(args)?;
-    let x1: i32 = args.get(2).and_then(|s| parse_i32(s)).unwrap_or(0);
-    let y1: i32 = args.get(3).and_then(|s| parse_i32(s)).unwrap_or(0);
-    let x2: i32 = args.get(4).and_then(|s| parse_i32(s)).unwrap_or(0);
-    let y2: i32 = args.get(5).and_then(|s| parse_i32(s)).unwrap_or(0);
+    let x1: i32 = get_arg_i32(args, 2, 0);
+    let y1: i32 = get_arg_i32(args, 3, 0);
+    let x2: i32 = get_arg_i32(args, 4, 0);
+    let y2: i32 = get_arg_i32(args, 5, 0);
     let c = get_draw_color(args, 6, &canvas);
     let thickness = (canvas.size as i32).max(1);
 
@@ -463,10 +484,10 @@ pub fn draw_line(args: &[String]) -> Result<Option<String>, String> {
 /// 绘制.方形 handle x y w h [radius|corner_string] [color]$
 pub fn draw_rect_fill(args: &[String]) -> Result<Option<String>, String> {
     let (handle, mut canvas) = resolve_canvas(args)?;
-    let x: f64 = args.get(2).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let y: f64 = args.get(3).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let w: f64 = args.get(4).and_then(|s| parse_f64(s)).unwrap_or(10.0);
-    let h: f64 = args.get(5).and_then(|s| parse_f64(s)).unwrap_or(10.0);
+    let x: f64 = get_arg_f64(args, 2, 0.0);
+    let y: f64 = get_arg_f64(args, 3, 0.0);
+    let w: f64 = get_arg_f64(args, 4, 10.0);
+    let h: f64 = get_arg_f64(args, 5, 10.0);
     let radii = parse_radii(args.get(6));
     let c = get_draw_color(args, 7, &canvas);
 
@@ -478,10 +499,10 @@ pub fn draw_rect_fill(args: &[String]) -> Result<Option<String>, String> {
 /// 绘制.方形描边 handle x y w h [radius|corner_string] [color]$
 pub fn draw_rect_stroke(args: &[String]) -> Result<Option<String>, String> {
     let (handle, mut canvas) = resolve_canvas(args)?;
-    let x: f64 = args.get(2).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let y: f64 = args.get(3).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let w: f64 = args.get(4).and_then(|s| parse_f64(s)).unwrap_or(10.0);
-    let h: f64 = args.get(5).and_then(|s| parse_f64(s)).unwrap_or(10.0);
+    let x: f64 = get_arg_f64(args, 2, 0.0);
+    let y: f64 = get_arg_f64(args, 3, 0.0);
+    let w: f64 = get_arg_f64(args, 4, 10.0);
+    let h: f64 = get_arg_f64(args, 5, 10.0);
     let radii = parse_radii(args.get(6));
     let c = get_draw_color(args, 7, &canvas);
     let thickness = (canvas.size as f64).max(1.0);
@@ -494,10 +515,10 @@ pub fn draw_rect_stroke(args: &[String]) -> Result<Option<String>, String> {
 /// 绘制.椭圆 handle x y w h [color]$
 pub fn draw_ellipse_stroke(args: &[String]) -> Result<Option<String>, String> {
     let (handle, mut canvas) = resolve_canvas(args)?;
-    let x: f64 = args.get(2).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let y: f64 = args.get(3).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let w: f64 = args.get(4).and_then(|s| parse_f64(s)).unwrap_or(10.0);
-    let h: f64 = args.get(5).and_then(|s| parse_f64(s)).unwrap_or(10.0);
+    let x: f64 = get_arg_f64(args, 2, 0.0);
+    let y: f64 = get_arg_f64(args, 3, 0.0);
+    let w: f64 = get_arg_f64(args, 4, 10.0);
+    let h: f64 = get_arg_f64(args, 5, 10.0);
     let c = get_draw_color(args, 6, &canvas);
     let thickness = (canvas.size as f64).max(1.0);
 
@@ -509,10 +530,10 @@ pub fn draw_ellipse_stroke(args: &[String]) -> Result<Option<String>, String> {
 /// 绘制.椭圆填充 handle x y w h [color]$
 pub fn draw_ellipse_fill(args: &[String]) -> Result<Option<String>, String> {
     let (handle, mut canvas) = resolve_canvas(args)?;
-    let x: f64 = args.get(2).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let y: f64 = args.get(3).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let w: f64 = args.get(4).and_then(|s| parse_f64(s)).unwrap_or(10.0);
-    let h: f64 = args.get(5).and_then(|s| parse_f64(s)).unwrap_or(10.0);
+    let x: f64 = get_arg_f64(args, 2, 0.0);
+    let y: f64 = get_arg_f64(args, 3, 0.0);
+    let w: f64 = get_arg_f64(args, 4, 10.0);
+    let h: f64 = get_arg_f64(args, 5, 10.0);
     let c = get_draw_color(args, 6, &canvas);
 
     draw_ellipse_path(&mut canvas, x, y, w, h, c, 0.0, true);
@@ -523,11 +544,11 @@ pub fn draw_ellipse_fill(args: &[String]) -> Result<Option<String>, String> {
 /// 绘制.圆形 handle cx cy [radius] [startDeg] [endDeg] [color]$
 pub fn draw_pie_stroke(args: &[String]) -> Result<Option<String>, String> {
     let (handle, mut canvas) = resolve_canvas(args)?;
-    let cx: f64 = args.get(2).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let cy: f64 = args.get(3).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let radius: f64 = args.get(4).and_then(|s| parse_f64(s)).unwrap_or(50.0);
-    let start_deg: f64 = args.get(5).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let end_deg: f64 = args.get(6).and_then(|s| parse_f64(s)).unwrap_or(360.0);
+    let cx: f64 = get_arg_f64(args, 2, 0.0);
+    let cy: f64 = get_arg_f64(args, 3, 0.0);
+    let radius: f64 = get_arg_f64(args, 4, 50.0);
+    let start_deg: f64 = get_arg_f64(args, 5, 0.0);
+    let end_deg: f64 = get_arg_f64(args, 6, 360.0);
     let c = get_draw_color(args, 7, &canvas);
     let thickness = (canvas.size as f64).max(1.0);
 
@@ -539,11 +560,11 @@ pub fn draw_pie_stroke(args: &[String]) -> Result<Option<String>, String> {
 /// 绘制.圆形填充 handle cx cy [radius] [startDeg] [endDeg] [color]$
 pub fn draw_pie_fill(args: &[String]) -> Result<Option<String>, String> {
     let (handle, mut canvas) = resolve_canvas(args)?;
-    let cx: f64 = args.get(2).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let cy: f64 = args.get(3).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let radius: f64 = args.get(4).and_then(|s| parse_f64(s)).unwrap_or(50.0);
-    let start_deg: f64 = args.get(5).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let end_deg: f64 = args.get(6).and_then(|s| parse_f64(s)).unwrap_or(360.0);
+    let cx: f64 = get_arg_f64(args, 2, 0.0);
+    let cy: f64 = get_arg_f64(args, 3, 0.0);
+    let radius: f64 = get_arg_f64(args, 4, 50.0);
+    let start_deg: f64 = get_arg_f64(args, 5, 0.0);
+    let end_deg: f64 = get_arg_f64(args, 6, 360.0);
     let c = get_draw_color(args, 7, &canvas);
 
     draw_pie_path(&mut canvas, cx, cy, radius, start_deg, end_deg, c, 0.0, true);
@@ -554,11 +575,11 @@ pub fn draw_pie_fill(args: &[String]) -> Result<Option<String>, String> {
 /// 绘制.圆弧 handle cx cy radius startDeg endDeg [color]$
 pub fn draw_arc(args: &[String]) -> Result<Option<String>, String> {
     let (handle, mut canvas) = resolve_canvas(args)?;
-    let cx: f64 = args.get(2).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let cy: f64 = args.get(3).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let radius: f64 = args.get(4).and_then(|s| parse_f64(s)).unwrap_or(50.0);
-    let start_deg: f64 = args.get(5).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let end_deg: f64 = args.get(6).and_then(|s| parse_f64(s)).unwrap_or(360.0);
+    let cx: f64 = get_arg_f64(args, 2, 0.0);
+    let cy: f64 = get_arg_f64(args, 3, 0.0);
+    let radius: f64 = get_arg_f64(args, 4, 50.0);
+    let start_deg: f64 = get_arg_f64(args, 5, 0.0);
+    let end_deg: f64 = get_arg_f64(args, 6, 360.0);
     let c = get_draw_color(args, 7, &canvas);
     let thickness = (canvas.size as f64).max(1.0);
 
@@ -587,9 +608,9 @@ pub fn draw_image(args: &[String]) -> Result<Option<String>, String> {
         return Err("无效的图片来源".into());
     };
 
-    let paste_x: i32 = args.get(3).and_then(|s| parse_i32(s)).unwrap_or(0);
-    let paste_y: i32 = args.get(4).and_then(|s| parse_i32(s)).unwrap_or(0);
-    let alpha: f32 = args.get(5).and_then(|s| parse_f64(s)).unwrap_or(1.0) as f32;
+    let paste_x: i32 = get_arg_i32(args, 3, 0);
+    let paste_y: i32 = get_arg_i32(args, 4, 0);
+    let alpha: f32 = get_arg_f64(args, 5, 1.0) as f32;
 
     let src_w = src_canvas.width as i32;
     let src_h = src_canvas.height as i32;
@@ -614,8 +635,8 @@ pub fn draw_image(args: &[String]) -> Result<Option<String>, String> {
 /// 绘制.文本 handle x y text [color] [strokeColor]$
 pub fn draw_text(args: &[String]) -> Result<Option<String>, String> {
     let (handle, mut canvas) = resolve_canvas(args)?;
-    let x: i32 = args.get(2).and_then(|s| parse_i32(s)).unwrap_or(0);
-    let y: i32 = args.get(3).and_then(|s| parse_i32(s)).unwrap_or(0);
+    let x: i32 = get_arg_i32(args, 2, 0);
+    let y: i32 = get_arg_i32(args, 3, 0);
     let text = args.get(4).cloned().unwrap_or_default();
     let c = get_draw_color(args, 5, &canvas);
     let stroke_c = args.get(6).and_then(|s| parse_color(s));
@@ -696,10 +717,10 @@ pub fn canvas_mosaic_all(args: &[String]) -> Result<Option<String>, String> {
 /// 绘制.马赛克 handle x y w h$
 pub fn draw_mosaic(args: &[String]) -> Result<Option<String>, String> {
     let (handle, mut canvas) = resolve_canvas(args)?;
-    let x: i32 = args.get(2).and_then(|s| parse_i32(s)).unwrap_or(0);
-    let y: i32 = args.get(3).and_then(|s| parse_i32(s)).unwrap_or(0);
-    let w: i32 = args.get(4).and_then(|s| parse_i32(s)).unwrap_or(10);
-    let h: i32 = args.get(5).and_then(|s| parse_i32(s)).unwrap_or(10);
+    let x: i32 = get_arg_i32(args, 2, 0);
+    let y: i32 = get_arg_i32(args, 3, 0);
+    let w: i32 = get_arg_i32(args, 4, 10);
+    let h: i32 = get_arg_i32(args, 5, 10);
     let block_size: u32 = (canvas.size as u32).max(1).max(8);
 
     let x = clamp(x, 0, canvas.width as i32);
@@ -715,10 +736,10 @@ pub fn draw_mosaic(args: &[String]) -> Result<Option<String>, String> {
 /// 绘制.高斯模糊 handle x y w h$
 pub fn draw_gaussian_blur(args: &[String]) -> Result<Option<String>, String> {
     let (handle, mut canvas) = resolve_canvas(args)?;
-    let x: i32 = args.get(2).and_then(|s| parse_i32(s)).unwrap_or(0);
-    let y: i32 = args.get(3).and_then(|s| parse_i32(s)).unwrap_or(0);
-    let w: i32 = args.get(4).and_then(|s| parse_i32(s)).unwrap_or(10);
-    let h: i32 = args.get(5).and_then(|s| parse_i32(s)).unwrap_or(10);
+    let x: i32 = get_arg_i32(args, 2, 0);
+    let y: i32 = get_arg_i32(args, 3, 0);
+    let w: i32 = get_arg_i32(args, 4, 10);
+    let h: i32 = get_arg_i32(args, 5, 10);
 
     if w <= 0 || h <= 0 {
         return Err("模糊区域宽高必须大于0".into());
@@ -879,7 +900,7 @@ fn rotate_270(pixels: &[u8], ow: usize, oh: usize, bg: [u8; 4]) -> Vec<u8> {
 /// 画布.旋转 handle degrees [bgColor]$
 pub fn canvas_rotate(args: &[String]) -> Result<Option<String>, String> {
     let (handle, mut canvas) = resolve_canvas(args)?;
-    let deg: f64 = args.get(2).and_then(|s| parse_f64(s)).unwrap_or(0.0);
+    let deg: f64 = get_arg_f64(args, 2, 0.0);
     if deg == 0.0 {
         return Ok(None);
     }
@@ -983,7 +1004,7 @@ pub fn canvas_rotate(args: &[String]) -> Result<Option<String>, String> {
 /// 画布.圆形 handle radius [bgColor]$
 pub fn canvas_round_corners(args: &[String]) -> Result<Option<String>, String> {
     let (handle, mut canvas) = resolve_canvas(args)?;
-    let radius: i32 = args.get(2).and_then(|s| parse_i32(s)).unwrap_or(0);
+    let radius: i32 = get_arg_i32(args, 2, 0);
     if radius <= 0 {
         return Ok(None);
     }
@@ -1339,10 +1360,10 @@ fn mosaic_region(canvas: &mut CanvasData, x: u32, y: u32, w: u32, h: u32, block_
 /// 绘制.喷漆 handle x1 y1 x2 y2 [rangeRadius] [density] [color] [pointRadius]$
 pub fn draw_brush_line(args: &[String]) -> Result<Option<String>, String> {
     let (handle, mut canvas) = resolve_canvas(args)?;
-    let x1: f64 = args.get(2).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let y1: f64 = args.get(3).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let x2: f64 = args.get(4).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let y2: f64 = args.get(5).and_then(|s| parse_f64(s)).unwrap_or(0.0);
+    let x1: f64 = get_arg_f64(args, 2, 0.0);
+    let y1: f64 = get_arg_f64(args, 3, 0.0);
+    let x2: f64 = get_arg_f64(args, 4, 0.0);
+    let y2: f64 = get_arg_f64(args, 5, 0.0);
 
     let range_radius: i32 = args.get(6).and_then(|s| parse_i32(s))
         .filter(|&v| v > 0)
@@ -1417,13 +1438,13 @@ fn draw_filled_circle_on(canvas: &mut CanvasData, cx: i32, cy: i32, r: i32, c: [
 /// 绘制.波浪 handle x1 y1 x2 y2 [amplitude] [wavelength] [step]$
 pub fn draw_wave_line(args: &[String]) -> Result<Option<String>, String> {
     let (handle, mut canvas) = resolve_canvas(args)?;
-    let x1: f64 = args.get(2).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let y1: f64 = args.get(3).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let x2: f64 = args.get(4).and_then(|s| parse_f64(s)).unwrap_or(0.0);
-    let y2: f64 = args.get(5).and_then(|s| parse_f64(s)).unwrap_or(0.0);
+    let x1: f64 = get_arg_f64(args, 2, 0.0);
+    let y1: f64 = get_arg_f64(args, 3, 0.0);
+    let x2: f64 = get_arg_f64(args, 4, 0.0);
+    let y2: f64 = get_arg_f64(args, 5, 0.0);
 
-    let wave_amplitude: f64 = args.get(6).and_then(|s| parse_f64(s)).unwrap_or(5.0);
-    let wave_length: f64 = args.get(7).and_then(|s| parse_f64(s)).unwrap_or(20.0);
+    let wave_amplitude: f64 = get_arg_f64(args, 6, 5.0);
+    let wave_length: f64 = get_arg_f64(args, 7, 20.0);
     let step: f64 = args.get(8).and_then(|s| parse_f64(s))
         .filter(|&v| v > 0.0)
         .unwrap_or(2.0);
@@ -1471,8 +1492,8 @@ pub fn draw_wave_line(args: &[String]) -> Result<Option<String>, String> {
 /// 绘制.油漆桶 handle x y [fillColor]$
 pub fn draw_flood_fill(args: &[String]) -> Result<Option<String>, String> {
     let (handle, mut canvas) = resolve_canvas(args)?;
-    let x: i32 = args.get(2).and_then(|s| parse_i32(s)).unwrap_or(0);
-    let y: i32 = args.get(3).and_then(|s| parse_i32(s)).unwrap_or(0);
+    let x: i32 = get_arg_i32(args, 2, 0);
+    let y: i32 = get_arg_i32(args, 3, 0);
     let fill_color = get_draw_color(args, 4, &canvas);
 
     if !canvas.in_bounds(x, y) {

@@ -214,6 +214,8 @@ pub struct DicContext {
     pub shared: Arc<SharedContext>,
     /// 正在加载的目录路径，防止 #引入= 循环递归
     pub reloading_dirs: HashSet<String>,
+    /// DAP 调试模式：println! 改走 ctx.output 避免污染 stdout 协议通道
+    pub debug_mode: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -245,6 +247,7 @@ impl DicContext {
             output: Output::new(),
             shared: Arc::new(shared),
             reloading_dirs: HashSet::new(),
+            debug_mode: false,
         };
         crate::functions::register_builtins(&mut ctx);
         ctx
@@ -322,7 +325,9 @@ impl DicContext {
                             } else {
                                 pv_processed.clone()
                             };
-                            self.val.p.set_string(&pv_prefix, pv_final.clone());
+                            // 仅存储为 包名.变量 跨包访问键
+                            let prefixed_key = format!("{}.{}", pkg_lookup, pv_prefix);
+                            self.val.p.set_string(&prefixed_key, pv_final);
                         } else if !pkg_line.trim().is_empty() {
                             // 非变量头部行加入初始化队列，确保引入包的可执行头部行得到执行
                             shared.init_lines.push(pkg_line.clone());
@@ -415,6 +420,8 @@ impl DicContext {
                                     pv_processed.clone()
                                 };
                                 self.val.p.set_string(&pv_prefix, pv_final.clone());
+                                let prefixed_key = format!("{}.{}", pkg_key, pv_prefix);
+                                self.val.p.set_string(&prefixed_key, pv_final);
                             } else if !pkg_line.trim().is_empty() {
                                 // 非变量头部行加入初始化队列，确保引入包的可执行头部行得到执行
                                 shared.init_lines.push(pkg_line.clone());
@@ -450,7 +457,9 @@ impl DicContext {
                             } else {
                                 pv_processed.clone()
                             };
-                            self.val.p.set_string(&pv_prefix, pv_final.clone());
+                            // 仅存储为 包名.变量 跨包访问键
+                            let prefixed_key = format!("{}.{}", pkg_key, pv_prefix);
+                            self.val.p.set_string(&prefixed_key, pv_final);
                         } else if !pkg_line.trim().is_empty() {
                             shared.init_lines.push(pkg_line.clone());
                         }
@@ -1447,6 +1456,7 @@ impl DicContext {
                 init_lines: Vec::new(),
             }),
             reloading_dirs: self.reloading_dirs.clone(),
+            debug_mode: self.debug_mode,
         }
     }
 
@@ -1697,21 +1707,18 @@ pub fn entry(ctx: &mut DicContext, txt: &[String]) {
             crate::executor::exec_stmts(ctx, &stmts);
         }
         Err(e) => {
-            // JSON 解析错误 → 拦截执行
-            if e.contains("[JSON错误]") {
-                eprintln!("\x1b[91m{}\x1b[0m", e);
-                ctx.sys.stop = true;
-                ctx.sys.error = Some(e);
-            } else {
-                // 解析失败，回退到旧状态机
-                entry_fallback(ctx, txt);
-            }
+            // 所有解析错误均为致命错误，输出详细信息并停止执行
+            let location = ctx.sys.file_location();
+            eprintln!("\x1b[91m{}解析错误: {}\x1b[0m", location, e);
+            ctx.sys.stop = true;
+            ctx.sys.error = Some(format!("{}{}", location, e));
         }
     }
 }
 
-/// 旧状态机（fallback）
-#[allow(unused)]
+/// 旧状态机（已废弃，保留用于参考。自 2026-07 起所有脚本统一走 AST executor）
+#[allow(unused, dead_code)]
+#[deprecated(note = "所有解析已统一走 AST executor，此 fallback 不再被调用")]
 fn entry_fallback(ctx: &mut DicContext, txt: &[String]) {
     let txt_len = txt.len();
     let mut is_if = false;
@@ -2674,6 +2681,16 @@ impl Nebula {
     /// 自动将工作目录切换到词库文件所在目录，使 #引入= 等相对路径正确解析
     pub fn from_file(path: &str) -> Result<Self, String> {
         let p = std::path::Path::new(path);
+        // 在切换 cwd 前解析绝对路径（供调试器断点匹配用）
+        let absolute_path = p.canonicalize().unwrap_or_else(|_| {
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join(p)
+            }
+        });
         // 切换到词库文件所在目录
         if let Some(parent) = p.parent() {
             if !parent.as_os_str().is_empty() {
@@ -2687,7 +2704,14 @@ impl Nebula {
             .unwrap_or(path);
         let build = crate::parser::parse_file(filename)?;
         let mut ctx = DicContext::new();
-        ctx.sys.source_file = filename.to_string();
+        // 去除 Windows canonicalize 产生的 \\?\ 前缀
+        let clean_path = if cfg!(windows) {
+            let s = absolute_path.to_string_lossy();
+            s.strip_prefix("\\\\?\\").unwrap_or(&s).to_string()
+        } else {
+            absolute_path.to_string_lossy().to_string()
+        };
+        ctx.sys.source_file = clean_path;
         Ok(Nebula { build, ctx })
     }
 

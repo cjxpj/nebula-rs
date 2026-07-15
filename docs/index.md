@@ -21,7 +21,8 @@ features:
 
 ## 工具
 
-- <a href="./public/vscode-nr/nr-language-0.1.0.vsix">下载 VS Code 语法高亮扩展 (.vsix)</a>
+- <a href="./vscode-nr/nr-language-0.1.1.vsix">下载 VS Code 语法高亮扩展 (.vsix)</a>
+  - 支持：语法高亮、注释切换、括号匹配、断点调试
   - 安装：VS Code → `Ctrl+Shift+P` → "Install from VSIX..." → 选择下载的文件
 
 ## 项目信息

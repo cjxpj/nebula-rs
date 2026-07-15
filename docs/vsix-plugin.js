@@ -49,7 +49,14 @@ export function vsixPackager() {
             // dev 模式下先打包，再监听源文件变化自动重打包
             pack();
 
-            const watcher = ['package.json', 'syntaxes', 'snippets', 'language-configuration.json', 'extension.js'];
+            const watcher = [
+                'package.json',
+                'syntaxes',
+                'snippets',
+                'language-configuration.json',
+                'extension.js',
+                'debug-adapter.js',
+            ];
             for (const file of watcher) {
                 const fp = path.resolve(vscodeDir, file);
                 server.watcher.add(fp);

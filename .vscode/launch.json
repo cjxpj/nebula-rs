@@ -5,6 +5,13 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "type": "nr-debug",
+            "request": "launch",
+            "name": "NR 调试",
+            "program": "dicTest/dic.nr",
+            "stopOnEntry": false
+        },
+        {
             "name": "Debug executable 'nebula'",
             "type": "lldb",
             "request": "launch",
@@ -14,7 +21,10 @@
                     "--bin=nebula"
                 ]
             },
-            "args": ["dicTest/dic.nr"]
+            "args": [
+                "--debug",
+                "dicTest/dic.nr"
+            ]
         },
         {
             "name": "Debug unit tests in executable 'nebula'",
@@ -26,7 +36,9 @@
                     "--bin=nebula"
                 ]
             },
-            "args": ["dicTest/dic.nr"]
+            "args": [
+                "dicTest/dic.nr"
+            ]
         }
     ]
 }
