@@ -488,9 +488,9 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
         .canonicalize()
         .map(|p| {
             let s = p.to_string_lossy().to_string();
-            // 去除 Windows \\?\ 前缀
+            // 去除 Windows \\?\ 前缀，并统一为正斜杠（与 VS Code URI 一致）
             if cfg!(windows) {
-                s.strip_prefix("\\\\?\\").unwrap_or(&s).to_string()
+                s.strip_prefix("\\\\?\\").unwrap_or(&s).replace('\\', "/")
             } else {
                 s
             }

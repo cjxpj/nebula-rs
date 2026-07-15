@@ -3,14 +3,15 @@
 //! 通过 stdin/stdout 与 VS Code 调试器通信，支持：
 //! - 断点设置/移除
 //! - 单步执行（StepOver / StepIn / StepOut）
-//! - 继续执行
-//! - 变量查看
-//! - 调用栈查看
-//!
-//! 架构：
-//!   主线程 = DAP 消息循环（stdin/stdout）
-//!   子线程 = NR 脚本执行器
-//!   两个线程通过 mpsc channel 通信
+
+// - 继续执行
+// - 变量查看
+// - 调用栈查看
+//
+// 架构：
+//   主线程 = DAP 消息循环（stdin/stdout）
+//   子线程 = NR 脚本执行器
+//   两个线程通过 mpsc channel 通信
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, BufRead, Read, Write};
@@ -100,6 +101,8 @@ pub struct StackFrame {
     pub name: String,
     pub file: String,
     pub line: usize,
+    /// 该帧暂停时的作用域链（点击调用栈帧切换时用于显示对应帧的变量）
+    pub scope_chain: Vec<(String, HashMap<String, String>)>,
 }
 
 /// 步进意图（暂停后消费步进命令时暂存，供下一条语句检查）
@@ -198,10 +201,11 @@ fn send_message(writer: &mut io::StdoutLock, msg: &Value) {
 
 /* ===================== 辅助函数 ===================== */
 
-/// 去除 Windows canonicalize 产生的 \\?\ 前缀，避免 VS Code 无法识别路径而打开新文件
+/// 规范化路径：去除 Windows `\\?\` 前缀，并将反斜杠转为正斜杠（VS Code 使用正斜杠 URI）
 fn clean_path(path: &str) -> String {
     if cfg!(windows) {
-        path.strip_prefix("\\\\?\\").unwrap_or(path).to_string()
+        let stripped = path.strip_prefix("\\\\?\\").unwrap_or(path);
+        stripped.replace('\\', "/")
     } else {
         path.to_string()
     }
@@ -260,15 +264,18 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
         // 1) 处理 executor 发来的事件（全部排空）
         loop {
             match event_rx.try_recv() {
-                Ok(DebugEvent::Stopped { reason, .. }) => {
+                Ok(DebugEvent::Stopped { reason, _file, _line }) => {
+                    let fname = _file.rsplit(&['\\', '/'][..]).next().unwrap_or(&_file);
                     let ev = json!({
                         "type": "event",
                         "seq": seq,
                         "event": "stopped",
                         "body": {
                             "reason": reason,
+                            "description": format!("Paused in {}", fname),
                             "threadId": 1,
                             "allThreadsStopped": true,
+                            "text": format!("{} (line {})", fname, _line),
                         }
                     });
                     seq += 1;
@@ -487,6 +494,7 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
                 let frames: Vec<Value> = ds.call_stack.iter().map(|f| {
                     let fname = f.file.rsplit(&['\\', '/'][..]).next().unwrap_or(&f.file);
                     let display_path = clean_path(&f.file);
+                    eprintln!("[DAP] stackTrace frame id={} name={} path={}", f.id, f.name, display_path);
                     json!({
                         "id": f.id,
                         "name": f.name,
@@ -510,7 +518,13 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
 
                 let scopes: Vec<Value> = {
                     let ds = shared.lock().unwrap();
-                    ds.scope_chain.iter().enumerate().map(|(i, (name, vars))| {
+                    // 根据 frame_id 查找对应栈帧的作用域链
+                    let scope_chain = ds.call_stack
+                        .iter()
+                        .find(|f| f.id as u64 == frame_id)
+                        .map(|f| &f.scope_chain)
+                        .unwrap_or(&ds.scope_chain);
+                    scope_chain.iter().enumerate().map(|(i, (name, vars))| {
                         json!({
                             "name": name,
                             "variablesReference": (frame_id + 1000) * 10 + (i as u64),
@@ -547,8 +561,15 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
                 } else {
                     // 作用域引用：构建嵌套树
                     let scope_idx = (var_ref % 10) as usize;
+                    let frame_id = (var_ref / 10) - 1000;
                     let ds = shared.lock().unwrap();
-                    let flat_map = ds.scope_chain
+                    // 根据 frame_id 查找对应栈帧的作用域链
+                    let scope_chain = ds.call_stack
+                        .iter()
+                        .find(|f| f.id as u64 == frame_id)
+                        .map(|f| &f.scope_chain)
+                        .unwrap_or(&ds.scope_chain);
+                    let flat_map = scope_chain
                         .get(scope_idx)
                         .map(|(_, m)| m.clone());
                     let mut next_ref = ds.next_nested_ref;
@@ -728,7 +749,7 @@ pub fn check_debug_before_exec(
     line: usize,
     depth: usize,
     scope_chain: &[(String, HashMap<String, String>)],
-    call_stack: &[StackFrame],
+    is_func_call: bool,
 ) -> bool {
     let mut ds = shared.lock().unwrap();
 
@@ -736,12 +757,12 @@ pub fn check_debug_before_exec(
         return false;
     }
 
-    // 更新位置信息
+    // 更新位置信息（ds.call_stack 由 exec_func_call_debug 管理 push/pop，
+    // 由 Stmt::FuncCall 分支更新调用者帧，此处只更新栈顶帧行号）
     ds.current_file = file.to_string();
     ds.current_line = line;
     ds.depth = depth;
     ds.scope_chain = scope_chain.to_vec();
-    ds.call_stack = call_stack.to_vec();
     // 更新栈顶帧的行号为当前执行行
     if let Some(top) = ds.call_stack.last_mut() {
         top.line = line;
@@ -758,11 +779,18 @@ pub fn check_debug_before_exec(
         true
     } else if let Some(ref intent) = ds.step_pending {
         // 来自暂停后阻塞循环中消费的步进命令（使用引用避免提前消费）
-        match intent {
-            StepIntent::StepIn => true,
-            StepIntent::StepOver(step_depth) => depth <= *step_depth,
-            StepIntent::StepOut(step_depth) => depth < *step_depth,
-        }
+        let pause = match intent {
+            StepIntent::StepIn => { true },
+            StepIntent::StepOver(step_depth) => {
+                let p = depth <= *step_depth;
+                p
+            },
+            StepIntent::StepOut(step_depth) => {
+                let p = depth < *step_depth;
+                p
+            },
+        };
+        pause
     } else {
         // 检查是否有待处理的步进命令
         match cmd_rx.try_recv() {
@@ -784,6 +812,13 @@ pub fn check_debug_before_exec(
     if need_pause {
         ds.paused = true;
         ds.step_pending = None; // 暂停时清除步进意图
+
+        // 更新调用栈顶部帧为当前暂停位置（确保 VS Code 显示正确的行号和文件）
+        if let Some(top) = ds.call_stack.last_mut() {
+            top.line = line;
+            top.file = file.to_string();
+            top.scope_chain = scope_chain.to_vec();
+        }
         drop(ds);
 
         // 通知 DAP 线程：已停止
@@ -812,7 +847,13 @@ pub fn check_debug_before_exec(
                 Ok(DebugCommand::StepIn) => {
                     let mut ds = shared.lock().unwrap();
                     ds.paused = false;
-                    ds.step_pending = Some(StepIntent::StepIn);
+                    if is_func_call {
+                        // 当前暂停在函数调用上 → 真正步入
+                        ds.step_pending = Some(StepIntent::StepIn);
+                    } else {
+                        // 当前不是函数调用 → 行为等同于 StepOver
+                        ds.step_pending = Some(StepIntent::StepOver(depth));
+                    }
                     break;
                 }
                 Ok(DebugCommand::StepOut(_)) => {

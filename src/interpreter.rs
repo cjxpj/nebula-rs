@@ -1497,10 +1497,10 @@ impl Nebula {
             .unwrap_or(path);
         let build = crate::parser::parse_file(filename)?;
         let mut ctx = DicContext::new();
-        // 去除 Windows canonicalize 产生的 \\?\ 前缀
+        // 去除 Windows canonicalize 产生的 \\?\ 前缀，并统一为正斜杠（与 VS Code URI 一致）
         let clean_path = if cfg!(windows) {
             let s = absolute_path.to_string_lossy();
-            s.strip_prefix("\\\\?\\").unwrap_or(&s).to_string()
+            s.strip_prefix("\\\\?\\").unwrap_or(&s).replace('\\', "/")
         } else {
             absolute_path.to_string_lossy().to_string()
         };

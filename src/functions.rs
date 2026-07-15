@@ -785,12 +785,7 @@ fn print_core(ctx: &mut DicContext, args: &[String]) -> String {
     let value = args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
     let texted = ctx.val.text(&value);
     let result = crate::count::run_count_text(&ctx.val, &texted);
-    if ctx.debug_mode {
-        // DAP 模式：走 output 而非 println!，避免污染 stdout 协议通道
-        ctx.output.add(&format!("{}\n", crate::analyzer::unescape_newline(&result)));
-    } else {
-        println!("{}", crate::analyzer::unescape_newline(&result));
-    }
+    ctx.output.add(&format!("{}\n", crate::analyzer::unescape_newline(&result)));
     result
 }
 
@@ -890,7 +885,7 @@ fn run_server(
     let listener = match TcpListener::bind(&bind_addr) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[Nebula] 服务器启动失败: {}", e);
+            ctx.output.add(&format!("[Nebula] 服务器启动失败: {}\n", e));
             return Some(format!("[错误] {} 服务器启动失败: {}", ctx.sys.file_location(), e));
         }
     };
@@ -901,7 +896,7 @@ fn run_server(
         let stream = match stream {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[Nebula] 连接错误: {}", e);
+                ctx.output.add(&format!("[Nebula] 连接错误: {}\n", e));
                 continue;
             }
         };
@@ -3222,7 +3217,7 @@ fn download_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
             .map_err(|e| format!("读取失败: {}", e))
             .map(|_| ())
     })() {
-        eprintln!("[Nebula] {}", e);
+        ctx.output.add(&format!("[Nebula] {}\n", e));
         return Some(String::new());
     }
     // 写入文件时加写锁
@@ -3230,7 +3225,7 @@ fn download_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
     match file_lock::with_file_write(&save_path_buf, || std::fs::write(&save_path, &data)) {
         Ok(()) => Some("true".to_string()),
         Err(e) => {
-            eprintln!("[Nebula] {}", e);
+            ctx.output.add(&format!("[Nebula] {}\n", e));
             Some(String::new())
         }
     }

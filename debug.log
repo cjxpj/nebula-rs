@@ -1,0 +1,34 @@
+[EXEC] exec_stmts_impl_debug: file=C:\Users\admin\Documents\rust\nebula\dicTest\dic.nr depth=0 stmts=1
+[EXEC] exec_stmts_impl_debug: file=C:\Users\admin\Documents\rust\nebula\dicTest\dic.nr depth=0 stmts=9
+[DAP] need_pause=true breakpoint at C:\Users\admin\Documents\rust\nebula\dicTest\dic.nr:10 depth=0
+[DAP] stepIn command received
+[DAP] StepIn at func_call: file=C:\Users\admin\Documents\rust\nebula\dicTest\dic.nr line=10 depth=0 is_func_call=true -> StepIn
+[EXEC] search_pkg_ctor found: ctor_name=测试.初始化 line=4 text=["$打印 1-0$", "$打印 1-1$", "$打印 1-2$", "$打印 1-3$", "$打印 1-4$"]
+[EXEC] executing pkg func: func_line=4 source_file=C:\Users\admin\Documents\rust\nebula\dicTest\test.nr code_lines=5
+[EXEC] exec_stmts_impl_debug: file=C:\Users\admin\Documents\rust\nebula\dicTest\test.nr depth=1 stmts=5
+[DAP] step_pending=StepIn at C:\Users\admin\Documents\rust\nebula\dicTest\test.nr:4 depth=1 -> pause
+[DAP] stepIn command received
+[DAP] StepIn at func_call: file=C:\Users\admin\Documents\rust\nebula\dicTest\test.nr line=4 depth=1 is_func_call=true -> StepIn
+[DAP] step_pending=StepIn at C:\Users\admin\Documents\rust\nebula\dicTest\test.nr:5 depth=1 -> pause
+[DAP] stepIn command received
+[DAP] StepIn at func_call: file=C:\Users\admin\Documents\rust\nebula\dicTest\test.nr line=5 depth=1 is_func_call=true -> StepIn
+[DAP] step_pending=StepIn at C:\Users\admin\Documents\rust\nebula\dicTest\test.nr:6 depth=1 -> pause
+[EXEC] exec_stmts_impl_debug: file=C:\Users\admin\Documents\rust\nebula\dicTest\dic.nr depth=0 stmts=1
+[EXEC] exec_stmts_impl_debug: file=C:\Users\admin\Documents\rust\nebula\dicTest\dic.nr depth=0 stmts=9
+[DAP] need_pause=true breakpoint at C:\Users\admin\Documents\rust\nebula\dicTest\dic.nr:10 depth=0
+[DAP] stepIn command received
+[DAP] StepIn at func_call: file=C:\Users\admin\Documents\rust\nebula\dicTest\dic.nr line=10 depth=0 is_func_call=true -> StepIn
+[EXEC] search_pkg_ctor found: ctor_name=测试.初始化 line=4 text=["$打印 1-0$", "$打印 1-1$", "$打印 1-2$", "$打印 1-3$", "$打印 1-4$"]
+[EXEC] executing pkg func: func_line=4 source_file=C:\Users\admin\Documents\rust\nebula\dicTest\test.nr code_lines=5
+[EXEC] exec_stmts_impl_debug: file=C:\Users\admin\Documents\rust\nebula\dicTest\test.nr depth=1 stmts=5
+[DAP] step_pending=StepIn at C:\Users\admin\Documents\rust\nebula\dicTest\test.nr:4 depth=1 -> pause
+[DAP] stepIn command received
+[DAP] StepIn at func_call: file=C:\Users\admin\Documents\rust\nebula\dicTest\test.nr line=4 depth=1 is_func_call=true -> StepIn
+[DAP] step_pending=StepIn at C:\Users\admin\Documents\rust\nebula\dicTest\test.nr:5 depth=1 -> pause
+[DAP] stepIn command received
+[DAP] StepIn at func_call: file=C:\Users\admin\Documents\rust\nebula\dicTest\test.nr line=5 depth=1 is_func_call=true -> StepIn
+[DAP] step_pending=StepIn at C:\Users\admin\Documents\rust\nebula\dicTest\test.nr:6 depth=1 -> pause
+[DAP] stepIn command received
+[DAP] StepIn at func_call: file=C:\Users\admin\Documents\rust\nebula\dicTest\test.nr line=6 depth=1 is_func_call=true -> StepIn
+[DAP] step_pending=StepIn at C:\Users\admin\Documents\rust\nebula\dicTest\test.nr:7 depth=1 -> pause
+[DAP] need_pause=true breakpoint at C:\Users\admin\Documents\rust\nebula\dicTest\dic.nr:13 depth=0

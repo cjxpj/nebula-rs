@@ -3,17 +3,19 @@
 //! 脚本语法：
 //!   Output:     任何无赋值操作符的行
 //!   Assign:     key:value, key+:value, key-:value, key*:value, key/:value, key%:value
-//!   Loop:       循环>var=N ... <循环   或   循环>var ... <循环 (无限)
-//!   If/Else:    如果:cond ... 如果尾
-//!   ForEach:    遍历>var,array ... <遍历
-//!   FuncCall:   $func args$
-//!   Label:      :labelName
-//!   Goto:       goto labelName
-//!   Skip:       >跳过
-//!   BreakLoop:  >跳出 / >终止循环
-//!   BreakForEach: >终止遍历
-//!   Stop:       >终止
-//!   TextBlock:  ''' ... '''
+
+//   Loop:       循环>var=N ... <循环   或   循环>var ... <循环 (无限)
+//   If/Else:    如果:cond ... 如果尾
+//   ForEach:    遍历>var,array ... <遍历
+//   FuncCall:   $func args$
+//   Label:      :labelName
+//   Goto:       goto labelName
+//   Skip:       >跳过
+//   BreakLoop:  >跳出 / >终止循环
+//   BreakForEach: >终止遍历
+//   Stop:       >终止
+//   TextBlock:  ''' ... '''
+//   AsyncOutput: #: 直接打印
 
 use crate::analyzer::val_text_test;
 use crate::ast::*;
@@ -751,6 +753,8 @@ fn parse_triple_quote_block(
 /// 解析 $函数名 参数1 参数2$ 格式的行
 fn parse_func_call_line(line: &str) -> Option<Stmt> {
     let line = line.trim_end();
+    // 支持 $func$\r 语法（\r 是 nebula 的无换行标记，需剥离后再匹配 $ 闭合）
+    let line = line.strip_suffix("\\r").unwrap_or(line);
     if !line.starts_with('$') || !line.ends_with('$') {
         return None;
     }
@@ -1030,6 +1034,7 @@ pub fn run_debug_executor(
                 name: "main".to_string(),
                 file: ds.current_file.clone(),
                 line: 0,
+                scope_chain: Vec::new(),
             }];
         }
         let result = exec_stmts_with_debug(&mut nb.ctx, &init_lines, &shared, &event_tx, &cmd_rx, 0);
@@ -1074,6 +1079,7 @@ fn exec_main_with_debug_handler(
             name: "main".to_string(),
             file: ds.current_file.clone(),
             line: line_offset,
+            scope_chain: Vec::new(),
         }];
     }
 
@@ -1127,17 +1133,15 @@ fn exec_stmts_impl_debug(
         return ExecResult::Stop;
     }
 
-    // 构建调用栈
+    // 调用栈由 exec_func_call_debug 管理 push/pop，此处不重复管理
     let _func_name = ctx.val.p.get_cloned("self");
-    let call_stack: Vec<StackFrame> = {
-        let ds = shared.lock().unwrap();
-        ds.call_stack.clone()
-    };
-    // 调用栈已在外层管理，此处不重复 push
 
     while idx >= 0 && idx < len {
         // 计算行号
-        let line = ctx.sys.line_offset + (idx as usize);
+        let line = ctx.sys.line_offset + (idx as usize) + 1;
+
+        let stmt = &stmts[idx as usize];
+        let is_func_call = matches!(stmt, Stmt::FuncCall { .. });
 
         // 按链分层收集变量，过滤内部变量
         let scope_chain: Vec<(String, HashMap<String, String>)> = ctx.val.p.collect_chain_vars()
@@ -1153,12 +1157,10 @@ fn exec_stmts_impl_debug(
 
         // 调试检查
         if !dap::check_debug_before_exec(
-            shared, event_tx, cmd_rx, &file, line, depth, &scope_chain, &call_stack,
+            shared, event_tx, cmd_rx, &file, line, depth, &scope_chain, is_func_call,
         ) {
             return ExecResult::Stop;
         }
-
-        let stmt = &stmts[idx as usize];
 
         match stmt {
             Stmt::Output(text) => {
@@ -1222,6 +1224,14 @@ fn exec_stmts_impl_debug(
                 }
             }
             Stmt::FuncCall { name, args } => {
+                // 进入函数调用前，将调用者栈帧更新为当前调用位置
+                {
+                    let mut ds = shared.lock().unwrap();
+                    if let Some(top) = ds.call_stack.last_mut() {
+                        top.line = line;
+                        top.file = file.clone();
+                    }
+                }
                 let result = exec_func_call_debug(
                     ctx, name, args,
                     global_labels, &labels,
@@ -1576,11 +1586,17 @@ fn exec_func_call_debug(
                 {
                     let mut ds = shared.lock().unwrap();
                     let frame_id = ds.call_stack.len();
+                    // 保存调用者的作用域链
+                    let saved_scope = ds.scope_chain.clone();
+                    if let Some(caller) = ds.call_stack.last_mut() {
+                        caller.scope_chain = saved_scope;
+                    }
                     ds.call_stack.push(StackFrame {
                         id: frame_id,
                         name: func_name.to_string(),
                         file: ctx.sys.source_file.clone(),
                         line: func_line,
+                        scope_chain: Vec::new(),
                     });
                 }
                 let exec_result = exec_stmts_impl_debug(
@@ -1674,8 +1690,12 @@ fn exec_func_call_debug(
                 let pfx = format!("{} ", method);
                 let cmt = format!("{}.{}", method, method);
                 // 搜索方法：构造函数 / 普通方法 / 静态方法
+                let mut is_ctor = false;
                 let found_pkg = crate::functions::search_pkg_ctor(pkg_bv, method)
-                    .map(|(text, line, ctor_name)| (text, Vec::new(), Vec::new(), false, line, ctor_name, raw_obj.to_string()));
+                    .map(|(text, line, ctor_name)| {
+                        is_ctor = true;
+                        (text, Vec::new(), Vec::new(), false, line, ctor_name, raw_obj.to_string())
+                    });
                 let found_pkg = found_pkg.or_else(|| {
                     for item in &pkg_bv.local_func {
                         if item.trigger == cmt || item.trigger == method || item.trigger.starts_with(&pfx) {
@@ -1761,11 +1781,17 @@ fn exec_func_call_debug(
                     {
                         let mut ds = shared.lock().unwrap();
                         let frame_id = ds.call_stack.len();
+                        // 保存调用者的作用域链
+                        let saved_scope = ds.scope_chain.clone();
+                        if let Some(caller) = ds.call_stack.last_mut() {
+                            caller.scope_chain = saved_scope;
+                        }
                         ds.call_stack.push(StackFrame {
                             id: frame_id,
                             name: name.to_string(),
                             file: sub_ctx.sys.source_file.clone(),
-                            line: func_line + 1,
+                            line: func_line,
+                            scope_chain: Vec::new(),
                         });
                     }
 
@@ -1782,9 +1808,35 @@ fn exec_func_call_debug(
                         return result;
                     }
 
-                    let out = sub_ctx.output.get();
-                    if !out.is_empty() {
-                        ctx.output.add_string(out);
+                    if is_ctor {
+                        // OOP 构造函数：分配实例池
+                        let class_spec = if use_obj.contains('.') {
+                            use_obj.to_string()
+                        } else if let Some((cs, _)) = crate::functions::resolve_class_from_pool(&use_obj) {
+                            if cs.contains('.') {
+                                cs
+                            } else {
+                                format!("{}.{}", cs, method)
+                            }
+                        } else if ctx.shared.packages.contains_key(raw_obj) {
+                            format!("{}.{}", raw_obj, method)
+                        } else if ctx.shared.packages.contains_key(&use_obj) {
+                            format!("{}.{}", use_obj, method)
+                        } else {
+                            method.to_string()
+                        };
+                        let handle = crate::functions::pool_alloc_instance(&class_spec);
+                        ctx.save_ctor_instance_vars(&sub_ctx, &handle);
+                        // 构造函数：输出子上下文中的打印内容
+                        let out = sub_ctx.output.get();
+                        if !out.is_empty() {
+                            ctx.output.add_string(out);
+                        }
+                    } else {
+                        let out = sub_ctx.output.get();
+                        if !out.is_empty() {
+                            ctx.output.add_string(out);
+                        }
                     }
                     return result;
                 }
@@ -1846,11 +1898,17 @@ fn exec_func_call_debug(
         {
             let mut ds = shared.lock().unwrap();
             let frame_id = ds.call_stack.len();
+            // 保存调用者的作用域链
+            let saved_scope = ds.scope_chain.clone();
+            if let Some(caller) = ds.call_stack.last_mut() {
+                caller.scope_chain = saved_scope;
+            }
             ds.call_stack.push(StackFrame {
                 id: frame_id,
                 name: name.to_string(),
                 file: ctx.sys.source_file.clone(),
                 line: func_line + 1,
+                scope_chain: Vec::new(),
             });
         }
 
@@ -2039,7 +2097,7 @@ fn exec_stmts_impl(
                 let text_with_vars = ctx.val.text(text);
                 let text_with_funcs = ctx.run_internal_text(&text_with_vars);
                 let final_text = count::run_count_text(&ctx.val, &text_with_funcs);
-                println!("{}", final_text);
+                ctx.output.add(&final_text);
             }
         }
 
@@ -2085,7 +2143,7 @@ fn normalize_json_numbers(ctx: &mut DicContext, s: &str) -> String {
 
 /// 输出 JSON 解析错误，并拦截后续执行
 fn json_err(ctx: &mut DicContext, site: &str, detail: &str) {
-    eprintln!("\x1b[91m[JSON错误@{site}] 无法解析为合法 JSON: {detail}\x1b[0m");
+    ctx.output.add(&format!("\x1b[91m[JSON错误@{site}] 无法解析为合法 JSON: {detail}\x1b[0m\n"));
     ctx.sys.stop = true;
     ctx.sys.error = Some("JSON解析失败".to_string());
 }
@@ -3161,15 +3219,13 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                     }
                     crate::functions::writeback_ptr_vars(ctx, &sub_ctx, &raw_args, &param_names, 0);
                     if found_is_ctor {
-                        // OOP 构造函数：分配实例池，返回 0x 内存地址指针
-                        // use_obj 可能是 0x 池指针 → 先从池中解析 class_spec
+                        // OOP 构造函数：分配实例池
                         let class_spec = if use_obj.contains('.') {
                             use_obj.clone()
                         } else if let Some((cs, _)) = crate::functions::resolve_class_from_pool(&use_obj) {
                             if cs.contains('.') {
                                 cs
                             } else {
-                                // 包指针（class_spec 即包名）：拼接类名
                                 format!("{}.{}", cs, method)
                             }
                         } else if ctx.shared.packages.contains_key(raw_obj) {
@@ -3181,8 +3237,11 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String]) {
                         };
                         let handle = crate::functions::pool_alloc_instance(&class_spec);
                         ctx.save_ctor_instance_vars(&sub_ctx, &handle);
-                        // 构造函数：丢弃原始输出，仅返回 0x 指针
-                        ctx.output.add_string(handle);
+                        // 构造函数：输出子上下文中的打印内容
+                        let out = sub_ctx.output.get();
+                        if !out.is_empty() {
+                            ctx.output.add_string(out);
+                        }
                     } else {
                         ctx.save_instance_vars(&sub_ctx, raw_obj, &resolved_obj);
                         let out = sub_ctx.output.get();
@@ -3426,7 +3485,7 @@ fn entry_via_ast(ctx: &mut DicContext, code: &[String]) {
         Err(e) => {
             // JSON 解析错误 → 拦截执行
             if e.contains("[JSON错误]") {
-                eprintln!("\x1b[91m{}\x1b[0m", e);
+                ctx.output.add(&format!("\x1b[91m{}\x1b[0m\n", e));
                 ctx.sys.stop = true;
                 ctx.sys.error = Some(e);
             } else {

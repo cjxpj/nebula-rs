@@ -22,7 +22,6 @@
                 ]
             },
             "args": [
-                "--debug",
                 "dicTest/dic.nr"
             ]
         },
