@@ -17,12 +17,14 @@ type TriggerResult = (Vec<String>, String, Vec<String>, Vec<String>);
 #[allow(dead_code)]
 pub struct Output {
     parts: Vec<String>,
+    /// \r 延迟输出缓冲区：\r 后缀的行暂存于此，函数结束时 flush 到 parts
+    pending: Vec<String>,
 }
 
 #[allow(dead_code)]
 impl Output {
     pub fn new() -> Self {
-        Output { parts: Vec::new() }
+        Output { parts: Vec::new(), pending: Vec::new() }
     }
     pub fn add(&mut self, s: &str) {
         if !s.is_empty() {
@@ -37,8 +39,97 @@ impl Output {
     pub fn get(&self) -> String {
         self.parts.join("")
     }
+    /// 如果最后一个 part 以 \n 结尾，去掉该 \n
+    pub fn strip_trailing_newline(&mut self) {
+        if let Some(last) = self.parts.last_mut() {
+            if last.ends_with('\n') {
+                last.pop();
+            }
+        }
+    }
     pub fn clear(&mut self) {
         self.parts.clear();
+        self.pending.clear();
+    }
+
+    // === \r 延迟输出 ===
+
+    /// 将文本加入 \r 延迟缓冲区
+    pub fn add_pending(&mut self, s: &str) {
+        if !s.is_empty() {
+            self.pending.push(s.to_string());
+        }
+    }
+
+    /// 延迟缓冲区是否非空
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// 将延迟缓冲区的内容追加到正式输出末尾
+    pub fn flush_pending(&mut self) {
+        self.parts.append(&mut self.pending);
+    }
+
+    /// 返回 parts 的长度，用于捕获函数调用期间的输出增量
+    pub fn parts_len(&self) -> usize {
+        self.parts.len()
+    }
+
+    /// 将 from_idx 及之后的 parts 移动到 pending 缓冲区
+    /// \r 语义：确保末尾有 \n（换行），再延迟输出
+    pub fn move_tail_to_pending(&mut self, from_idx: usize) {
+        let mut tail: Vec<String> = self.parts.drain(from_idx..).collect();
+        // 确保最后一个 part 以 \n 结尾
+        if let Some(last) = tail.last_mut() {
+            if !last.ends_with('\n') {
+                last.push('\n');
+            }
+        }
+        for s in tail {
+            if !s.is_empty() {
+                self.pending.push(s);
+            }
+        }
+    }
+
+    /// 仅将最后一个 part 移动到 pending（自动加 \n 保证换行）
+    /// 用于构造函数 \r：构造函数体 $打印$ 立即输出，仅返回值 0x 指针延迟
+    pub fn move_last_to_pending(&mut self) {
+        if let Some(last) = self.parts.pop() {
+            if !last.is_empty() {
+                let s = if last.ends_with('\n') { last } else { last + "\n" };
+                self.pending.push(s);
+            }
+        }
+    }
+
+    /// 将另一个 Output 的 parts 逐个追加到当前 Output
+    /// （避免 get() 拼接导致 $打印$ 的 \n 混入中间）
+    pub fn append_parts_from(&mut self, other: &Output) {
+        for part in &other.parts {
+            if !part.is_empty() {
+                self.parts.push(part.clone());
+            }
+        }
+    }
+
+    /// 从 from_idx 开始 drain parts 并返回拼接后的字符串
+    pub fn drain_from(&mut self, from_idx: usize) -> String {
+        if from_idx >= self.parts.len() {
+            return String::new();
+        }
+        let drained: Vec<String> = self.parts.drain(from_idx..).collect();
+        drained.join("")
+    }
+
+    /// 排空 pending 缓冲区并返回拼接后的字符串
+    pub fn drain_pending(&mut self) -> String {
+        if self.pending.is_empty() {
+            return String::new();
+        }
+        let drained: Vec<String> = self.pending.drain(..).collect();
+        drained.join("")
     }
 }
 
@@ -57,6 +148,10 @@ pub struct SysV {
     pub external_labels: std::collections::HashMap<String, (isize, usize)>,
     /// 待处理的跨函数 goto 目标 (index, depth)
     pub pending_goto: Option<(isize, usize)>,
+
+    /// 标记最近一次 exec_func_call 是否是构造函数调用
+    /// 用于 Stmt::FuncCall 的 \r 处理：构造函数体的 $打印$ 应即时输出，仅返回值延迟
+    pub last_call_was_ctor: bool,
 
     pub if_func: IfFuncState,
     pub for_state: ForState,
@@ -1448,7 +1543,7 @@ impl crate::iftext::CondEval for DicContext {
 pub fn entry(ctx: &mut DicContext, txt: &[String]) {
     match crate::executor::parse_stmts(txt, false, ctx.sys.line_offset, &ctx.sys.source_file) {
         Ok(stmts) => {
-            crate::executor::exec_stmts(ctx, &stmts);
+            crate::executor::exec_stmts(ctx, &stmts, None);
         }
         Err(e) => {
             // 所有解析错误均为致命错误，输出详细信息并停止执行
@@ -1601,6 +1696,7 @@ impl Nebula {
                 self.ctx.val.p.set_string(p, String::new());
             }
             entry(&mut self.ctx, &code);
+            self.ctx.output.flush_pending();
             let func_output = self.ctx.output.get();
             if head_output.is_empty() {
                 Ok(func_output)

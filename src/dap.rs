@@ -757,7 +757,7 @@ pub fn check_debug_before_exec(
         return false;
     }
 
-    // 更新位置信息（ds.call_stack 由 exec_func_call_debug 管理 push/pop，
+    // 更新位置信息（ds.call_stack 由 exec_func_call 管理 push/pop，
     // 由 Stmt::FuncCall 分支更新调用者帧，此处只更新栈顶帧行号）
     ds.current_file = file.to_string();
     ds.current_line = line;

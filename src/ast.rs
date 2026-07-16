@@ -156,7 +156,7 @@ pub enum Stmt {
     /// 遍历
     ForEach { var: String, array: Expr, body: Vec<Stmt> },
     /// 函数调用语句: $函数名$ 或 $函数名 参数$
-    FuncCall { name: String, args: Vec<String> },
+    FuncCall { name: String, args: Vec<String>, no_newline: bool },
     /// Go 风格标签: :labelName
     Label(String),
     /// Go 风格 goto: goto labelName
