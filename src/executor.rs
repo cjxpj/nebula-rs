@@ -56,6 +56,9 @@ pub struct DebugContext<'a> {
     pub event_tx: &'a Sender<DebugEvent>,
     pub cmd_rx: &'a Receiver<DebugCommand>,
     pub depth: usize,
+    /// 为 true 时，子上下文中的 Output 不立即发送 DebugEvent::Output，
+    /// 而是保留在 output 中由调用者统一处理（用于 \r 链延迟输出场景）
+    pub defer_output: bool,
 }
 
 /* ===================== 解析器 ===================== */
@@ -1034,6 +1037,7 @@ pub fn run_debug_executor(
         event_tx: &event_tx,
         cmd_rx: &cmd_rx,
         depth: 0,
+        defer_output: false,
     };
 
     {
@@ -1140,13 +1144,14 @@ fn collect_all_labels(stmts: &[Stmt]) -> std::collections::HashMap<String, isize
     labels
 }
 
-/// 创建子块调试上下文（深度 +1）
+/// 创建子块调试上下文（深度 +1，保持 defer_output）
 fn sub_debug_for<'a>(debug: Option<&'a DebugContext<'a>>) -> Option<DebugContext<'a>> {
     debug.map(|dbg| DebugContext {
         shared: dbg.shared,
         event_tx: dbg.event_tx,
         cmd_rx: dbg.cmd_rx,
         depth: dbg.depth + 1,
+        defer_output: dbg.defer_output,
     })
 }
 
@@ -1222,8 +1227,9 @@ fn exec_stmts_impl(
                 let parts_before = ctx.output.parts_len();
                 exec_output(ctx, text);
                 // Debug: 非 \r 输出立即发送（\r 输出进 pending，函数末尾 flush 时发送）
+                // defer_output 为 true 时跳过实时发送，由父调用者统一处理
                 if let Some(debug_ctx) = debug {
-                    if ctx.output.parts_len() > parts_before {
+                    if !debug_ctx.defer_output && ctx.output.parts_len() > parts_before {
                         let new_out = ctx.output.snapshot_from(parts_before);
                         if !new_out.is_empty() {
                             let _ = debug_ctx.event_tx.send(DebugEvent::Output(new_out));
@@ -1283,10 +1289,25 @@ fn exec_stmts_impl(
                 let is_builtin = ctx.shared.builtins.contains_key(name.as_str());
                 let effective_no_newline = *no_newline || (!is_builtin && ctx.output.has_pending());
                 let snapshot = if effective_no_newline { Some(ctx.output.parts_len()) } else { None };
-                // 延迟调用时剥离非 OOP 调用的 debug 上下文，避免子函数 exec_stmts_impl 实时发送绕过 \r 语义
-                // OOP 调用保留 debug 上下文，确保构造函数可以逐步调试（析构函数内部输出由 sub_ctx 实时发送，符合预期）
-                let is_oop_call = name.contains('.');
-                let debug_for_call: Option<&DebugContext> = if effective_no_newline && !is_oop_call { None } else { debug };
+                // 始终保留 debug 上下文，确保调用栈追踪和逐语句调试正常工作
+                // \r 链时设置 defer_output，子函数 Output 不实时发送，由父函数统一延迟处理
+                let _debug_deferred;
+                let debug_for_call: Option<&DebugContext> = if let Some(dbg) = debug {
+                    if effective_no_newline {
+                        _debug_deferred = DebugContext {
+                            shared: dbg.shared,
+                            event_tx: dbg.event_tx,
+                            cmd_rx: dbg.cmd_rx,
+                            depth: dbg.depth,
+                            defer_output: true,
+                        };
+                        Some(&_debug_deferred)
+                    } else {
+                        Some(dbg)
+                    }
+                } else {
+                    None
+                };
                 let parts_before_fc = ctx.output.parts_len();
                 let result = exec_func_call(ctx, name, args, debug_for_call);
                 // Debug: 根据 \r 语义决定立即发送还是延迟
@@ -1424,11 +1445,13 @@ fn exec_stmts_impl(
     }
 
     ctx.output.flush_pending();
-    // Debug: 仅发送尚未发送的延迟输出（\r 内容在 pending 中 flush 后变为 parts）
+    // Debug: 仅发送尚未发送的延迟输出（defer_output 时跳过，由父调用者处理）
     if let Some(debug_ctx) = debug {
-        let deferred = ctx.output.drain_from(debug_sent);
-        if !deferred.is_empty() {
-            let _ = debug_ctx.event_tx.send(DebugEvent::Output(deferred));
+        if !debug_ctx.defer_output {
+            let deferred = ctx.output.drain_from(debug_sent);
+            if !deferred.is_empty() {
+                let _ = debug_ctx.event_tx.send(DebugEvent::Output(deferred));
+            }
         }
     }
     ExecResult::Continue
@@ -2193,6 +2216,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                         event_tx: debug_ctx.event_tx,
                         cmd_rx: debug_ctx.cmd_rx,
                         depth: debug_ctx.depth + 1,
+                        defer_output: debug_ctx.defer_output,
                     };
                     let exec_result = exec_stmts_impl(&mut sub_ctx, &parsed_stmts, &func_labels, Some(&sub_debug));
                     {
@@ -2637,6 +2661,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                             event_tx: debug_ctx.event_tx,
                             cmd_rx: debug_ctx.cmd_rx,
                             depth: debug_ctx.depth + 1,
+                            defer_output: debug_ctx.defer_output,
                         };
                         let exec_result = exec_stmts_impl(&mut sub_ctx, &parsed_stmts, &func_labels, Some(&sub_debug));
                         {
@@ -2648,6 +2673,10 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                             return exec_result;
                         }
                         crate::functions::writeback_ptr_vars(ctx, &sub_ctx, &raw_args, &param_names, 0);
+                        // defer_output 时子上下文输出尚未发送，追加到父上下文
+                        if debug_ctx.defer_output {
+                            ctx.output.append_parts_from(&sub_ctx.output);
+                        }
                         if found_is_ctor {
                             let class_spec = if use_obj.contains('.') {
                                 use_obj.clone()
@@ -2662,12 +2691,10 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                             };
                             let handle = crate::functions::pool_alloc_instance(&class_spec);
                             ctx.save_ctor_instance_vars(&sub_ctx, &handle);
-                            // Debug: 子上下文输出已实时发送，handle 写入 ctx.output
-                            // 由 Stmt::FuncCall 根据 \r 语义决定立即发送还是延迟
+                            // handle 写入 ctx.output，由 Stmt::FuncCall 根据 \r 语义决定立即发送还是延迟
                             ctx.output.add(&handle);
                         } else {
                             ctx.save_instance_vars(&sub_ctx, raw_obj, &resolved_obj);
-                            // Debug: 子上下文输出已实时发送
                         }
                         return exec_result;
                     }
@@ -2914,6 +2941,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                     event_tx: debug_ctx.event_tx,
                     cmd_rx: debug_ctx.cmd_rx,
                     depth: debug_ctx.depth + 1,
+                    defer_output: debug_ctx.defer_output,
                 };
                 let exec_result = exec_stmts_impl(&mut sub_ctx, &parsed_stmts, &func_labels, Some(&sub_debug));
                 {
@@ -2933,7 +2961,10 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                         ctx.val.p.set_string(key, val.display());
                     }
                 }
-                // Debug: 子上下文输出已实时发送，不追加到父上下文
+                // defer_output 时子上下文输出尚未发送，追加到父上下文由调用者统一处理
+                if debug_ctx.defer_output {
+                    ctx.output.append_parts_from(&sub_ctx.output);
+                }
                 return exec_result;
             }
             entry_via_ast(&mut sub_ctx, &code);
