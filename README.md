@@ -22,11 +22,22 @@ cd nebula
 cargo run
 ```
 
+## 命令行
+
+```bash
+nebula <文件.nr>               # 批处理模式（执行 [f]main）
+nebula -i <文件.nr>            # 交互 REPL 模式
+nebula --debug [文件.nr]       # DAP 调试模式（VS Code 断点调试）
+nebula --check-update [-c]     # 检测新版本
+nebula --update [-u]           # 自动更新
+nebula -h, --help              # 显示帮助
+```
+
 ## 项目结构
 
 ```
 src/
-├── main.rs          # 入口
+├── main.rs          # 入口、CLI 参数解析
 ├── parser.rs        # .nr 词库文件解析
 ├── interpreter.rs   # 核心状态机解释器
 ├── executor.rs      # AST 语句执行与表达式求值
@@ -35,8 +46,11 @@ src/
 ├── count.rs         # [...] 数学表达式求值
 ├── analyzer.rs      # 赋值操作符检测、转义处理
 ├── iftext.rs        # 条件表达式求值（短路）
-├── functions.rs     # 内置函数注册
-└── canvas.rs        # 像素画布与图像生成
+├── functions.rs     # 内置函数注册、OOP 实例池
+├── canvas.rs        # 像素画布与图像生成
+├── dap.rs           # DAP 调试适配器（VS Code 断点调试）
+├── updater.rs       # 自动更新（GitHub Releases）
+└── file_lock.rs     # 文件锁（并发文件访问）
 ```
 
 ## 文档
@@ -56,6 +70,8 @@ src/
 | [面向对象](https://cjxpj.github.io/nebula-rs/#/v0.1.0/oop) | 类定义、实例化、方法调用 |
 | [模块与引入](https://cjxpj.github.io/nebula-rs/#/v0.1.0/modules) | 文件/目录引入、热更新、星号引入 |
 | [内置函数](https://cjxpj.github.io/nebula-rs/#/v0.1.0/flow-output) | 流程控制、输出、标准库 |
+| [DAP 调试](https://cjxpj.github.io/nebula-rs/#/v0.1.0/debug) | VS Code 断点调试、单步执行、变量查看 |
+| [命令行工具](https://cjxpj.github.io/nebula-rs/#/v0.1.0/cli) | 批处理、REPL、自动更新 |
 
 ## 许可证
 

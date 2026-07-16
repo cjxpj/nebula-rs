@@ -24,6 +24,8 @@ features:
 - <a href="./vscode-nr/nr-language-0.1.1.vsix">下载 VS Code 语法高亮扩展 (.vsix)</a>
   - 支持：语法高亮、注释切换、括号匹配、断点调试
   - 安装：VS Code → `Ctrl+Shift+P` → "Install from VSIX..." → 选择下载的文件
+- **DAP 调试**：内置 Debug Adapter Protocol 支持，可在 VS Code 中断点调试 `.nr` 脚本。详见 [DAP 调试](./v0.1.0/debug)
+- **自动更新**：`nebula --check-update` 检测新版本，`nebula --update` 一键更新。详见 [命令行工具](./v0.1.0/cli)
 
 ## 项目信息
 
