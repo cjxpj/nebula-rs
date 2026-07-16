@@ -1140,6 +1140,29 @@ fn collect_all_labels(stmts: &[Stmt]) -> std::collections::HashMap<String, isize
     labels
 }
 
+/// 创建子块调试上下文（深度 +1）
+fn sub_debug_for<'a>(debug: Option<&'a DebugContext<'a>>) -> Option<DebugContext<'a>> {
+    debug.map(|dbg| DebugContext {
+        shared: dbg.shared,
+        event_tx: dbg.event_tx,
+        cmd_rx: dbg.cmd_rx,
+        depth: dbg.depth + 1,
+    })
+}
+
+/// 统一处理子块执行结果（Loop / If / ForEach）
+fn handle_block_result(result: ExecResult, idx: &mut isize) -> Option<ExecResult> {
+    match result {
+        ExecResult::Stop => return Some(ExecResult::Stop),
+        ExecResult::Skip => return Some(ExecResult::Skip),
+        ExecResult::Goto(target) => {
+            *idx = target;
+            return Some(ExecResult::Continue);
+        }
+        ExecResult::Continue => None,
+    }
+}
+
 /// 执行 AST 语句列表（带全局标签映射，支持跨作用域 goto）
 fn exec_stmts_impl(
     ctx: &mut DicContext,
@@ -1213,27 +1236,10 @@ fn exec_stmts_impl(
                 exec_assign(ctx, target, op, expr);
             }
             Stmt::Loop { var, count, condition, cached_tokens, body } => {
-                // Debug: 子块深度 +1（原 debug 路径为 depth + 1）
-                let mut sub_debug_holder: Option<DebugContext> = None;
-                let sub_debug: Option<&DebugContext> = debug.and_then(|dbg| {
-                    sub_debug_holder = Some(DebugContext {
-                        shared: dbg.shared,
-                        event_tx: dbg.event_tx,
-                        cmd_rx: dbg.cmd_rx,
-                        depth: dbg.depth + 1,
-                    });
-                    sub_debug_holder.as_ref()
-                });
+                let holder = sub_debug_for(debug);
+                let sub_debug = holder.as_ref();
                 let result = exec_loop(ctx, var, count, condition, cached_tokens, body, global_labels, sub_debug);
-                match result {
-                    ExecResult::Stop => return ExecResult::Stop,
-                    ExecResult::Skip => return ExecResult::Skip,
-                    ExecResult::Goto(target) => {
-                        idx = target;
-                        continue;
-                    }
-                    ExecResult::Continue => {}
-                }
+                if let Some(r) = handle_block_result(result, &mut idx) { return r; }
             }
             Stmt::If {
                 conds,
@@ -1241,50 +1247,16 @@ fn exec_stmts_impl(
                 branches,
                 else_branch,
             } => {
-                // Debug: 子块深度 +1
-                let mut sub_debug_holder: Option<DebugContext> = None;
-                let sub_debug: Option<&DebugContext> = debug.and_then(|dbg| {
-                    sub_debug_holder = Some(DebugContext {
-                        shared: dbg.shared,
-                        event_tx: dbg.event_tx,
-                        cmd_rx: dbg.cmd_rx,
-                        depth: dbg.depth + 1,
-                    });
-                    sub_debug_holder.as_ref()
-                });
+                let holder = sub_debug_for(debug);
+                let sub_debug = holder.as_ref();
                 let result = exec_if(ctx, conds, cached_tokens, branches, else_branch, global_labels, sub_debug);
-                match result {
-                    ExecResult::Stop => return ExecResult::Stop,
-                    ExecResult::Skip => return ExecResult::Skip,
-                    ExecResult::Goto(target) => {
-                        idx = target;
-                        continue;
-                    }
-                    ExecResult::Continue => {}
-                }
+                if let Some(r) = handle_block_result(result, &mut idx) { return r; }
             }
             Stmt::ForEach { var, array, body } => {
-                // Debug: 子块深度 +1
-                let mut sub_debug_holder: Option<DebugContext> = None;
-                let sub_debug: Option<&DebugContext> = debug.and_then(|dbg| {
-                    sub_debug_holder = Some(DebugContext {
-                        shared: dbg.shared,
-                        event_tx: dbg.event_tx,
-                        cmd_rx: dbg.cmd_rx,
-                        depth: dbg.depth + 1,
-                    });
-                    sub_debug_holder.as_ref()
-                });
+                let holder = sub_debug_for(debug);
+                let sub_debug = holder.as_ref();
                 let result = exec_foreach(ctx, var, array, body, global_labels, sub_debug);
-                match result {
-                    ExecResult::Stop => return ExecResult::Stop,
-                    ExecResult::Skip => return ExecResult::Skip,
-                    ExecResult::Goto(target) => {
-                        idx = target;
-                        continue;
-                    }
-                    ExecResult::Continue => {}
-                }
+                if let Some(r) = handle_block_result(result, &mut idx) { return r; }
             }
             Stmt::FuncCall { name, args, no_newline } => {
                 // Debug: 更新调用者栈帧为当前调用位置

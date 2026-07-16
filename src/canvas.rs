@@ -705,7 +705,7 @@ pub fn canvas_mosaic_all(args: &[String]) -> Result<Option<String>, String> {
     let block_size: u32 = args.get(2)
         .and_then(|s| parse_i32(s))
         .map(|v| v.max(1) as u32)
-        .unwrap_or_else(|| (canvas.size as u32).max(1).max(8));
+        .unwrap_or_else(|| (canvas.size as u32).max(8));
 
     let cw = canvas.width;
     let ch = canvas.height;
@@ -721,7 +721,7 @@ pub fn draw_mosaic(args: &[String]) -> Result<Option<String>, String> {
     let y: i32 = get_arg_i32(args, 3, 0);
     let w: i32 = get_arg_i32(args, 4, 10);
     let h: i32 = get_arg_i32(args, 5, 10);
-    let block_size: u32 = (canvas.size as u32).max(1).max(8);
+    let block_size: u32 = (canvas.size as u32).max(8);
 
     let x = clamp(x, 0, canvas.width as i32);
     let y = clamp(y, 0, canvas.height as i32);
@@ -1367,7 +1367,7 @@ pub fn draw_brush_line(args: &[String]) -> Result<Option<String>, String> {
 
     let range_radius: i32 = args.get(6).and_then(|s| parse_i32(s))
         .filter(|&v| v > 0)
-        .unwrap_or_else(|| (canvas.size as i32).max(1).max(3));
+        .unwrap_or_else(|| (canvas.size as i32).max(3));
 
     let density: i32 = args.get(7).and_then(|s| parse_i32(s))
         .unwrap_or(50)

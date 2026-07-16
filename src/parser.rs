@@ -104,11 +104,11 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
     }
 
     for (dic_i, line_ref) in lines.iter().enumerate() {
-        let mut line = line_ref.clone();
-
-        if !line.is_empty() && !suojin {
-            line = line.trim_start().to_string();
-        }
+        let line = if !line_ref.is_empty() && !suojin {
+            line_ref.trim_start().to_string()
+        } else {
+            line_ref.clone()
+        };
 
         // 多行注释
         if zhushi {

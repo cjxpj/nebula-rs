@@ -373,8 +373,7 @@ impl DicContext {
                             if self.val.p.get(&pv_prefix).is_some() {
                                 continue;
                             }
-                            let pv_suffix_owned = pv_suffix.clone();
-                            let pv_processed = self.val.text(&pv_suffix_owned);
+                            let pv_processed = self.val.text(&pv_suffix);
                             let pv_final = if pv_suffix.starts_with('[') && pv_suffix.ends_with(']') {
                                 crate::count::run_count_text(&self.val, &pv_processed)
                             } else {
@@ -457,8 +456,7 @@ impl DicContext {
                                 if self.val.p.get(&pv_prefix).is_some() {
                                     continue;
                                 }
-                                let pv_suffix_owned = pv_suffix.clone();
-                                let pv_processed = self.val.text(&pv_suffix_owned);
+                                let pv_processed = self.val.text(&pv_suffix);
                                 let pv_final = if pv_suffix.starts_with('[') && pv_suffix.ends_with(']') {
                                     crate::count::run_count_text(&self.val, &pv_processed)
                                 } else {
@@ -1336,15 +1334,6 @@ impl DicContext {
                                 sub_ctx.val.p.set_string(&param_name, val.clone());
                                 if let Some(ref base) = var_base {
                                     sub_ctx.val.p.set_string(&format!("{}{}", base, i + 1), val);
-                                }
-                            }
-                            // 填充位置参数默认值到 %参数N%（param_names 为空时 defaults 仍有值）
-                            for i in arg_count.max(param_names.len())..defaults.len() {
-                                if let Some(ref d) = defaults[i] {
-                                    let val = self.val.p.resolve_default(d, has_named_params);
-                                    all_vals.push(val.clone());
-                                    let param_name = format!("参数{}", i + 1);
-                                    sub_ctx.val.p.set_string(&param_name, val);
                                 }
                             }
                             // 填充位置参数默认值到 %参数N%（param_names 为空时 defaults 仍有值）
