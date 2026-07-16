@@ -114,6 +114,23 @@ impl Output {
         }
     }
 
+    /// 从 from_idx 开始快照 parts（不 drain），返回拼接后的字符串
+    pub fn snapshot_from(&self, from_idx: usize) -> String {
+        if from_idx >= self.parts.len() {
+            return String::new();
+        }
+        self.parts[from_idx..].join("")
+    }
+
+    /// 快照 parts[from..to]（不 drain），返回拼接后的字符串
+    pub fn snapshot_range(&self, from: usize, to: usize) -> String {
+        if from >= self.parts.len() || to <= from {
+            return String::new();
+        }
+        let to = to.min(self.parts.len());
+        self.parts[from..to].join("")
+    }
+
     /// 从 from_idx 开始 drain parts 并返回拼接后的字符串
     pub fn drain_from(&mut self, from_idx: usize) -> String {
         if from_idx >= self.parts.len() {

@@ -1164,6 +1164,9 @@ fn exec_stmts_impl(
         return ExecResult::Stop;
     }
 
+    // Debug: 已发送到调试控制台的 parts 索引，用于避免 drain 时重复发送
+    let mut debug_sent: usize = 0;
+
     while idx >= 0 && idx < len {
         let stmt = &stmts[idx as usize];
 
@@ -1193,7 +1196,18 @@ fn exec_stmts_impl(
 
         match stmt {
             Stmt::Output(text) => {
+                let parts_before = ctx.output.parts_len();
                 exec_output(ctx, text);
+                // Debug: 非 \r 输出立即发送（\r 输出进 pending，函数末尾 flush 时发送）
+                if let Some(debug_ctx) = debug {
+                    if ctx.output.parts_len() > parts_before {
+                        let new_out = ctx.output.snapshot_from(parts_before);
+                        if !new_out.is_empty() {
+                            let _ = debug_ctx.event_tx.send(DebugEvent::Output(new_out));
+                            debug_sent = ctx.output.parts_len();
+                        }
+                    }
+                }
             }
             Stmt::Assign { target, op, expr } => {
                 exec_assign(ctx, target, op, expr);
@@ -1297,26 +1311,57 @@ fn exec_stmts_impl(
                 let is_builtin = ctx.shared.builtins.contains_key(name.as_str());
                 let effective_no_newline = *no_newline || (!is_builtin && ctx.output.has_pending());
                 let snapshot = if effective_no_newline { Some(ctx.output.parts_len()) } else { None };
-                let result = exec_func_call(ctx, name, args, debug);
-                if effective_no_newline {
+                // 延迟调用时剥离非 OOP 调用的 debug 上下文，避免子函数 exec_stmts_impl 实时发送绕过 \r 语义
+                // OOP 调用保留 debug 上下文，确保构造函数可以逐步调试（析构函数内部输出由 sub_ctx 实时发送，符合预期）
+                let is_oop_call = name.contains('.');
+                let debug_for_call: Option<&DebugContext> = if effective_no_newline && !is_oop_call { None } else { debug };
+                let parts_before_fc = ctx.output.parts_len();
+                let result = exec_func_call(ctx, name, args, debug_for_call);
+                // Debug: 根据 \r 语义决定立即发送还是延迟
+                if let Some(debug_ctx) = debug {
+                    if effective_no_newline {
+                        // \r 调用或链式延迟：移到 pending，函数末尾统一发送
+                        if ctx.sys.last_call_was_ctor && ctx.output.parts_len() > parts_before_fc {
+                            // 构造函数：内部输出由 sub_ctx 实时发送，handle 延迟
+                            let handle_idx = ctx.output.parts_len() - 1;
+                            if handle_idx > parts_before_fc {
+                                // 仅当 handle 之前还有额外输出时发送（debug=None 走正常路径的场景）
+                                let immediate = ctx.output.snapshot_range(parts_before_fc, handle_idx);
+                                if !immediate.is_empty() {
+                                    let _ = debug_ctx.event_tx.send(DebugEvent::Output(immediate));
+                                }
+                                debug_sent = handle_idx;
+                            }
+                            ctx.output.move_last_to_pending();
+                        } else if ctx.output.parts_len() > parts_before_fc {
+                            ctx.output.move_tail_to_pending(parts_before_fc);
+                        }
+                        // debug_sent 不更新（或已在上面更新），末尾 drain 会发送 pending
+                    } else if ctx.output.parts_len() > parts_before_fc {
+                        // 非延迟：立即发送新增输出
+                        let new_out = ctx.output.snapshot_from(parts_before_fc);
+                        if !new_out.is_empty() {
+                            let _ = debug_ctx.event_tx.send(DebugEvent::Output(new_out));
+                        }
+                        debug_sent = ctx.output.parts_len();
+                    }
+                } else if effective_no_newline {
                     if ctx.sys.last_call_was_ctor {
                         ctx.output.move_last_to_pending();
                     } else {
                         ctx.output.move_tail_to_pending(snapshot.unwrap());
                     }
                 }
-                // Debug: 处理 exec_func_call 的返回结果
-                if debug.is_some() {
-                    match result {
-                        ExecResult::Stop => return ExecResult::Stop,
-                        ExecResult::Skip => return ExecResult::Skip,
-                        ExecResult::Goto(target) => {
-                            ctx.sys.external_labels = old_external;
-                            idx = target;
-                            continue;
-                        }
-                        ExecResult::Continue => {}
+                // 处理 exec_func_call 的返回结果（Stop/Skip/Goto）
+                match result {
+                    ExecResult::Stop => return ExecResult::Stop,
+                    ExecResult::Skip => return ExecResult::Skip,
+                    ExecResult::Goto(target) => {
+                        ctx.sys.external_labels = old_external;
+                        idx = target;
+                        continue;
                     }
+                    ExecResult::Continue => {}
                 }
                 // 检查子调用是否触发了跨函数 goto
                 if let Some((target, depth)) = ctx.sys.pending_goto.take() {
@@ -1369,6 +1414,11 @@ fn exec_stmts_impl(
             Stmt::TextBlock { var, content } => {
                 if var.is_empty() {
                     ctx.output.add(content);
+                    // Debug: 文本块输出立即发送
+                    if let Some(debug_ctx) = debug {
+                        let _ = debug_ctx.event_tx.send(DebugEvent::Output(content.clone()));
+                        debug_sent = ctx.output.parts_len();
+                    }
                 } else {
                     ctx.val.p.set_string(var, content.clone());
                 }
@@ -1402,13 +1452,11 @@ fn exec_stmts_impl(
     }
 
     ctx.output.flush_pending();
-    // Debug: 顶层排空延迟输出到调试控制台
+    // Debug: 仅发送尚未发送的延迟输出（\r 内容在 pending 中 flush 后变为 parts）
     if let Some(debug_ctx) = debug {
-        if debug_ctx.depth == 0 {
-            let deferred = ctx.output.drain_from(0);
-            if !deferred.is_empty() {
-                let _ = debug_ctx.event_tx.send(DebugEvent::Output(deferred));
-            }
+        let deferred = ctx.output.drain_from(debug_sent);
+        if !deferred.is_empty() {
+            let _ = debug_ctx.event_tx.send(DebugEvent::Output(deferred));
         }
     }
     ExecResult::Continue
@@ -2495,6 +2543,25 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                             }
                         }
                     }
+                    // 更新子上下文的源文件为包/函数的实际文件（调试断点/堆栈需要）
+                    if let Some(pkg_dot) = use_obj.find('.') {
+                        let pkg_name = &use_obj[..pkg_dot];
+                        if let Some(pkg_bv) = ctx.shared.packages.get(pkg_name) {
+                            if !pkg_bv.source_file.is_empty() {
+                                sub_ctx.sys.source_file = pkg_bv.source_file.clone();
+                            }
+                        }
+                    } else {
+                        // use_obj 可能是包别名或类名，直接查找包
+                        for search in &[use_obj.as_str(), raw_obj] {
+                            if let Some(pkg_bv) = ctx.shared.packages.get(*search) {
+                                if !pkg_bv.source_file.is_empty() {
+                                    sub_ctx.sys.source_file = pkg_bv.source_file.clone();
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     // 实例变量持久化
                     ctx.load_instance_vars(&mut sub_ctx, raw_obj, &resolved_obj);
                     sub_ctx.val.p.set_string("self", use_obj.clone());
@@ -2587,7 +2654,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                             }
                             ds.call_stack.push(StackFrame {
                                 id: frame_id,
-                                name: qualified.clone(),
+                                name: name.to_string(),
                                 file: sub_ctx.sys.source_file.clone(),
                                 line: func_line,
                                 scope_chain: Vec::new(),
@@ -2623,11 +2690,12 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                             };
                             let handle = crate::functions::pool_alloc_instance(&class_spec);
                             ctx.save_ctor_instance_vars(&sub_ctx, &handle);
-                            ctx.output.append_parts_from(&sub_ctx.output);
+                            // Debug: 子上下文输出已实时发送，handle 写入 ctx.output
+                            // 由 Stmt::FuncCall 根据 \r 语义决定立即发送还是延迟
                             ctx.output.add(&handle);
                         } else {
                             ctx.save_instance_vars(&sub_ctx, raw_obj, &resolved_obj);
-                            ctx.output.append_parts_from(&sub_ctx.output);
+                            // Debug: 子上下文输出已实时发送
                         }
                         return exec_result;
                     }
@@ -2893,7 +2961,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                         ctx.val.p.set_string(key, val.display());
                     }
                 }
-                ctx.output.append_parts_from(&sub_ctx.output);
+                // Debug: 子上下文输出已实时发送，不追加到父上下文
                 return exec_result;
             }
             entry_via_ast(&mut sub_ctx, &code);
