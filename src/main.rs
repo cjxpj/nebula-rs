@@ -2,7 +2,7 @@ mod analyzer;
 mod ast;
 mod canvas;
 mod count;
-mod dap;
+mod debug;
 mod executor;
 mod file_lock;
 mod functions;
@@ -159,7 +159,7 @@ fn main() {
 
     // DAP 模式：文件路径可选（可通过 launch 请求传入）
     if dap_mode {
-        if let Err(e) = dap::run_dap_server(file_path) {
+        if let Err(e) = debug::run_dap_server(file_path) {
             eprintln!("\x1b[31m{}\x1b[0m", e);
         }
         return;

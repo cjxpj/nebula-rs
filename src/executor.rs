@@ -30,7 +30,7 @@ use crate::interpreter::DicContext;
 
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use crate::dap::{self, DebugCommand, DebugEvent, SharedDebugState, StackFrame};
+use crate::debug::{self, DebugCommand, DebugEvent, SharedDebugState, StackFrame};
 use crate::interpreter::Nebula;
 
 /* ===================== 执行结果 ===================== */
@@ -1214,7 +1214,7 @@ fn exec_stmts_impl(
                 })
                 .collect();
 
-            if !dap::check_debug_before_exec(
+            if !debug::check_debug_before_exec(
                 debug_ctx.shared, debug_ctx.event_tx, debug_ctx.cmd_rx,
                 &file, line, debug_ctx.depth, &scope_chain, is_func_call,
             ) {

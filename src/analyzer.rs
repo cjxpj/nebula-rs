@@ -125,7 +125,7 @@ pub fn val_text_test(text: &str) -> (i8, String, String) {
 }
 
 #[inline]
-fn is_chinese_char(c: char) -> bool {
+pub fn is_chinese_char(c: char) -> bool {
     matches!(c as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0x20000..=0x2A6DF)
 }
 
@@ -271,6 +271,15 @@ where
 
     result.push_str(&s[start..]);
     result
+}
+
+/// 规范化源文件路径为调试用格式：去除 Windows \\\\?\\ 前缀，统一为正斜杠
+pub fn normalize_source_path(path: &str) -> String {
+    if cfg!(windows) {
+        path.strip_prefix("\\\\?\\").unwrap_or(path).replace('\\', "/")
+    } else {
+        path.to_string()
+    }
 }
 
 /// 处理输出文本中的换行转义（逐字符状态机）：

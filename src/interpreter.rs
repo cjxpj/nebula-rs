@@ -337,35 +337,7 @@ impl DicContext {
                 });
                 if let Some(pkg_bv) = bv.packages.get(pkg_lookup) {
                     if !processed_heads.insert(pkg_lookup.to_string()) { continue; }
-                    // 冲突检测：类名不能和同包函数名相同
-                    let mut class_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
-                    for item in pkg_bv.local_func.iter().chain(pkg_bv.local_static.iter()) {
-                        for suffix in &[".初始化", ".new"] {
-                            if let Some(dot_pos) = item.trigger.find(suffix) {
-                                if dot_pos > 0 {
-                                    let after = &item.trigger[dot_pos + suffix.len()..];
-                                    if after.is_empty() || after.starts_with(' ') {
-                                        class_names.insert(&item.trigger[..dot_pos]);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    for class_name in &class_names {
-                        let pfx = format!("{} ", class_name);
-                        let conflict = pkg_bv.local_func.iter().any(|item|
-                            item.trigger == *class_name || item.trigger.starts_with(&pfx)
-                        ) || pkg_bv.local_static.iter().any(|item|
-                            item.trigger == *class_name || item.trigger.starts_with(&pfx)
-                        );
-                        if conflict {
-                            let file_loc = format!("{} 第{}行: ", self.sys.source_file, head_idx + 1);
-                            self.sys.error = Some(format!(
-                                "[错误] {}引入包 '{}' 时：类名 '{}' 与包内函数名冲突", file_loc, pkg_lookup, class_name
-                            ));
-                            self.sys.stop = true;
-                        }
-                    }
+                    check_class_name_conflicts(&mut self.sys, pkg_bv, pkg_lookup, head_idx, "引入");
                     if self.sys.stop { continue; }
                     for pkg_line in &pkg_bv.head {
                         let (pv_type, pv_prefix, pv_suffix) = val_text_test(pkg_line);
@@ -373,17 +345,10 @@ impl DicContext {
                             if self.val.p.get(&pv_prefix).is_some() {
                                 continue;
                             }
-                            let pv_processed = self.val.text(&pv_suffix);
-                            let pv_final = if pv_suffix.starts_with('[') && pv_suffix.ends_with(']') {
-                                crate::count::run_count_text(&self.val, &pv_processed)
-                            } else {
-                                pv_processed.clone()
-                            };
-                            // 仅存储为 包名.变量 跨包访问键
                             let prefixed_key = format!("{}.{}", pkg_lookup, pv_prefix);
-                            self.val.p.set_string(&prefixed_key, pv_final);
+                            let head_val = compute_head_value(&mut self.val, &pv_suffix);
+                            self.val.p.set_string(&prefixed_key, head_val);
                         } else if !pkg_line.trim().is_empty() {
-                            // 非变量头部行加入初始化队列，确保引入包的可执行头部行得到执行
                             shared.init_lines.push(pkg_line.clone());
                         }
                     }
@@ -401,35 +366,7 @@ impl DicContext {
                     let pkg_key = resolve_pkg_key(path);
                     if let Some(pkg_bv) = bv.packages.get(&pkg_key) {
                         if !processed_heads.insert(pkg_key.clone()) { continue; }
-                        // 冲突检测：类名不能和同包函数名相同
-                        let mut cn_set: std::collections::HashSet<&str> = std::collections::HashSet::new();
-                        for item in pkg_bv.local_func.iter().chain(pkg_bv.local_static.iter()) {
-                            for suffix in &[".初始化", ".new"] {
-                                if let Some(dot_pos) = item.trigger.find(suffix) {
-                                    if dot_pos > 0 {
-                                        let after = &item.trigger[dot_pos + suffix.len()..];
-                                        if after.is_empty() || after.starts_with(' ') {
-                                            cn_set.insert(&item.trigger[..dot_pos]);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        for class_name in &cn_set {
-                            let pfx = format!("{} ", class_name);
-                            let conflict = pkg_bv.local_func.iter().any(|item|
-                                item.trigger == *class_name || item.trigger.starts_with(&pfx)
-                            ) || pkg_bv.local_static.iter().any(|item|
-                                item.trigger == *class_name || item.trigger.starts_with(&pfx)
-                            );
-                            if conflict {
-                                let file_loc = format!("{} 第{}行: ", self.sys.source_file, head_idx + 1);
-                                self.sys.error = Some(format!(
-                                    "[错误] {}星引入包 '{}' 时：类名 '{}' 与包内函数名冲突", file_loc, pkg_key, class_name
-                                ));
-                                self.sys.stop = true;
-                            }
-                        }
+                        check_class_name_conflicts(&mut self.sys, pkg_bv, &pkg_key, head_idx, "星引入");
                         if self.sys.stop { continue; }
                         // 清理该包的旧星引入函数映射，再重新注册
                         shared.star_import_funcs.retain(|_, v| v != &pkg_key);
@@ -456,17 +393,11 @@ impl DicContext {
                                 if self.val.p.get(&pv_prefix).is_some() {
                                     continue;
                                 }
-                                let pv_processed = self.val.text(&pv_suffix);
-                                let pv_final = if pv_suffix.starts_with('[') && pv_suffix.ends_with(']') {
-                                    crate::count::run_count_text(&self.val, &pv_processed)
-                                } else {
-                                    pv_processed.clone()
-                                };
+                                let pv_final = compute_head_value(&mut self.val, &pv_suffix);
                                 self.val.p.set_string(&pv_prefix, pv_final.clone());
                                 let prefixed_key = format!("{}.{}", pkg_key, pv_prefix);
                                 self.val.p.set_string(&prefixed_key, pv_final);
                             } else if !pkg_line.trim().is_empty() {
-                                // 非变量头部行加入初始化队列，确保引入包的可执行头部行得到执行
                                 shared.init_lines.push(pkg_line.clone());
                             }
                         }
@@ -495,15 +426,9 @@ impl DicContext {
                             if self.val.p.get(&pv_prefix).is_some() {
                                 continue;
                             }
-                            let pv_processed = self.val.text(&pv_suffix);
-                            let pv_final = if pv_suffix.starts_with('[') && pv_suffix.ends_with(']') {
-                                crate::count::run_count_text(&self.val, &pv_processed)
-                            } else {
-                                pv_processed.clone()
-                            };
-                            // 仅存储为 包名.变量 跨包访问键
                             let prefixed_key = format!("{}.{}", pkg_key, pv_prefix);
-                            self.val.p.set_string(&prefixed_key, pv_final);
+                            let head_val = compute_head_value(&mut self.val, &pv_suffix);
+                            self.val.p.set_string(&prefixed_key, head_val);
                         } else if !pkg_line.trim().is_empty() {
                             shared.init_lines.push(pkg_line.clone());
                         }
@@ -688,13 +613,8 @@ impl DicContext {
             for line in &pkg_bv.head {
                 let (pv_type, pv_prefix, pv_suffix) = val_text_test(line);
                 if pv_type == 6 && !pv_prefix.is_empty() {
-                    let processed = self.val.text(&pv_suffix);
-                    let final_val = if pv_suffix.starts_with('[') && pv_suffix.ends_with(']') {
-                        crate::count::run_count_text(&self.val, &processed)
-                    } else {
-                        processed
-                    };
-                    self.val.p.set_string(&pv_prefix, final_val.clone());
+                    let head_val = compute_head_value(&mut self.val, &pv_suffix);
+                    self.val.p.set_string(&pv_prefix, head_val);
                 } else if !line.trim().is_empty() {
                     entry(self, &[line.clone()]);
                 }
@@ -742,13 +662,8 @@ impl DicContext {
                     for line in &file_bv.head {
                         let (pv_type, pv_prefix, pv_suffix) = val_text_test(line);
                         if pv_type == 6 && !pv_prefix.is_empty() {
-                            let processed = self.val.text(&pv_suffix);
-                            let final_val = if pv_suffix.starts_with('[') && pv_suffix.ends_with(']') {
-                                crate::count::run_count_text(&self.val, &processed)
-                            } else {
-                                processed
-                            };
-                            self.val.p.set_string(&pv_prefix, final_val.clone());
+                            let head_val = compute_head_value(&mut self.val, &pv_suffix);
+                            self.val.p.set_string(&pv_prefix, head_val);
                         } else if !line.trim().is_empty() {
                             entry(self, &[line.clone()]);
                         }
@@ -764,13 +679,8 @@ impl DicContext {
                 for line in &merged_bv.head {
                     let (pv_type, pv_prefix, pv_suffix) = val_text_test(line);
                     if pv_type == 6 && !pv_prefix.is_empty() {
-                        let processed = self.val.text(&pv_suffix);
-                        let final_val = if pv_suffix.starts_with('[') && pv_suffix.ends_with(']') {
-                            crate::count::run_count_text(&self.val, &processed)
-                        } else {
-                            processed
-                        };
-                        self.val.p.set_string(&pv_prefix, final_val.clone());
+                            let head_val = compute_head_value(&mut self.val, &pv_suffix);
+                            self.val.p.set_string(&pv_prefix, head_val);
                     } else if !line.trim().is_empty() {
                         entry(self, &[line.clone()]);
                     }
@@ -853,8 +763,9 @@ impl DicContext {
 
         let class_spec = format!("{}.{}", pkg, class);
         sub_ctx.val.p.set_string("self", class_spec.clone());
-        sub_ctx.val.p.set_string("触发", ctor_name.to_string());
-        sub_ctx.val.p.set_string("参数0", ctor_name.to_string());
+        let ctor_name_s = ctor_name.to_string();
+        sub_ctx.val.p.set_string("触发", ctor_name_s.clone());
+        sub_ctx.val.p.set_string("参数0", ctor_name_s);
 
         for (i, arg) in args.iter().skip(1).enumerate() {
             let val = self.val.text(arg);
@@ -1192,7 +1103,7 @@ impl DicContext {
                                 self.load_instance_vars(&mut sub_ctx, raw_obj, &resolved_obj);
                                 sub_ctx.val.p.set_string("self", resolved_obj.clone());
                                 sub_ctx.val.p.set_string("触发", qualified.clone());
-                                sub_ctx.val.p.set_string("参数0", qualified.clone());
+                                sub_ctx.val.p.set_string("参数0", qualified);
                                 let arg_count = args.len().saturating_sub(1);
                                 for (i, arg) in args.iter().skip(1).enumerate() {
                                     let param_name = format!("参数{}", i + 1);
@@ -1286,9 +1197,10 @@ impl DicContext {
                         // 自调用：保留变量上下文，继承当前所有变量
                         let mut sub_ctx = self.clone_for_internal();
                         sub_ctx.sys.line_offset = func_line;
-                        sub_ctx.val.p.set_string("触发", self.val.text(func_name));
-                        sub_ctx.val.p.set_string("self", self.val.text(func_name));
-                        sub_ctx.val.p.set_string("参数0", self.val.text(func_name));
+                        let func_name_resolved = self.val.text(func_name);
+                        sub_ctx.val.p.set_string("触发", func_name_resolved.clone());
+                        sub_ctx.val.p.set_string("self", func_name_resolved.clone());
+                        sub_ctx.val.p.set_string("参数0", func_name_resolved);
                         let has_named_params = !param_names.is_empty();
                         let arg_count = args.len().saturating_sub(1);
                         let required_count = defaults.iter().filter(|d| d.is_none()).count();
@@ -1361,9 +1273,10 @@ impl DicContext {
                         sub_ctx.sys.source_file = self.sys.source_file.clone();
                         // 注入变量：星引入函数用源包的 head 变量（隔离），否则用父上下文变量
                         crate::functions::inject_star_import_head_vars(self, &mut sub_ctx, func_name);
-                        sub_ctx.val.p.set_string("触发", self.val.text(func_name));
-                        sub_ctx.val.p.set_string("self", self.val.text(func_name));
-                        sub_ctx.val.p.set_string("参数0", self.val.text(func_name));
+                        let func_name_resolved = self.val.text(func_name);
+                        sub_ctx.val.p.set_string("触发", func_name_resolved.clone());
+                        sub_ctx.val.p.set_string("self", func_name_resolved.clone());
+                        sub_ctx.val.p.set_string("参数0", func_name_resolved);
                         let has_named_params = !param_names.is_empty();
                         let arg_count = args.len().saturating_sub(1);
                         let required_count = defaults.iter().filter(|d| d.is_none()).count();
@@ -1531,6 +1444,54 @@ impl DicContext {
     }
 }
 
+/// 计算 head 行变量的值：先做 %var% 替换，再对 [...] 做数学求值
+fn compute_head_value(val: &mut DicVal, suffix: &str) -> String {
+    let processed = val.text(suffix);
+    if suffix.starts_with('[') && suffix.ends_with(']') {
+        crate::count::run_count_text(val, &processed)
+    } else {
+        processed
+    }
+}
+
+/// 检查包内类名是否与函数名/内部词条名冲突
+fn check_class_name_conflicts(
+    sys: &mut SysV,
+    pkg_bv: &BuildValue,
+    pkg_key: &str,
+    head_idx: usize,
+    context_label: &str,
+) {
+    let mut class_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for item in pkg_bv.local_func.iter().chain(pkg_bv.local_static.iter()) {
+        for suffix in &[".初始化", ".new"] {
+            if let Some(dot_pos) = item.trigger.find(suffix) {
+                if dot_pos > 0 {
+                    let after = &item.trigger[dot_pos + suffix.len()..];
+                    if after.is_empty() || after.starts_with(' ') {
+                        class_names.insert(&item.trigger[..dot_pos]);
+                    }
+                }
+            }
+        }
+    }
+    for class_name in &class_names {
+        let pfx = format!("{} ", class_name);
+        let conflict = pkg_bv.local_func.iter().any(|item|
+            item.trigger == *class_name || item.trigger.starts_with(&pfx)
+        ) || pkg_bv.local_static.iter().any(|item|
+            item.trigger == *class_name || item.trigger.starts_with(&pfx)
+        );
+        if conflict {
+            let file_loc = format!("{} 第{}行: ", sys.source_file, head_idx + 1);
+            sys.error = Some(format!(
+                "[错误] {}{}包 '{}' 时：类名 '{}' 与包内函数名冲突", file_loc, context_label, pkg_key, class_name
+            ));
+            sys.stop = true;
+        }
+    }
+}
+
 impl crate::iftext::CondEval for DicContext {
     fn val(&self) -> &DicVal {
         &self.val
@@ -1599,12 +1560,7 @@ impl Nebula {
         let build = crate::parser::parse_file(filename)?;
         let mut ctx = DicContext::new();
         // 去除 Windows canonicalize 产生的 \\?\ 前缀，并统一为正斜杠（与 VS Code URI 一致）
-        let clean_path = if cfg!(windows) {
-            let s = absolute_path.to_string_lossy();
-            s.strip_prefix("\\\\?\\").unwrap_or(&s).replace('\\', "/")
-        } else {
-            absolute_path.to_string_lossy().to_string()
-        };
+        let clean_path = crate::analyzer::normalize_source_path(&absolute_path.to_string_lossy());
         ctx.sys.source_file = clean_path;
         Ok(Nebula { build, ctx })
     }
@@ -1694,9 +1650,10 @@ impl Nebula {
             if self.ctx.sys.stop {
                 return Err(head_output.trim_end().to_string());
             }
-            self.ctx.val.p.set_string("触发", func_name.to_string());
-            self.ctx.val.p.set_string("self", func_name.to_string());
-            self.ctx.val.p.set_string("参数0", func_name.to_string());
+            let fn_name_s = func_name.to_string();
+            self.ctx.val.p.set_string("触发", fn_name_s.clone());
+            self.ctx.val.p.set_string("self", fn_name_s.clone());
+            self.ctx.val.p.set_string("参数0", fn_name_s);
             // 初始化命名参数为空字符串
             for p in &param_names {
                 self.ctx.val.p.set_string(p, String::new());

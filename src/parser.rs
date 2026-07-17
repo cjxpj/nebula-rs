@@ -486,15 +486,7 @@ pub fn build_dic(_dic_path: &str, text: &str) -> Result<BuildValue, String> {
     // 规范化源文件路径为绝对路径（调试时用于断点匹配）
     let source_file = std::path::Path::new(_dic_path)
         .canonicalize()
-        .map(|p| {
-            let s = p.to_string_lossy().to_string();
-            // 去除 Windows \\?\ 前缀，并统一为正斜杠（与 VS Code URI 一致）
-            if cfg!(windows) {
-                s.strip_prefix("\\\\?\\").unwrap_or(&s).replace('\\', "/")
-            } else {
-                s
-            }
-        })
+        .map(|p| crate::analyzer::normalize_source_path(&p.to_string_lossy()))
         .unwrap_or_else(|_| _dic_path.to_string());
 
     Ok(BuildValue {
@@ -520,12 +512,8 @@ fn is_valid_func_name(name: &str) -> bool {
 
 fn is_valid_name_part(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| {
-        c.is_ascii_alphanumeric() || c == '_' || c == '#' || c == ' ' || c == '.' || c == '=' || is_chinese_char(c)
+        c.is_ascii_alphanumeric() || c == '_' || c == '#' || c == ' ' || c == '.' || c == '=' || crate::analyzer::is_chinese_char(c)
     })
-}
-
-fn is_chinese_char(c: char) -> bool {
-    matches!(c as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0x20000..=0x2A6DF)
 }
 
 /// 从文件加载并解析（带缓存）
