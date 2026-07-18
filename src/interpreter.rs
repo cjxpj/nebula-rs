@@ -1700,9 +1700,14 @@ impl Nebula {
             entry(&mut self.ctx, &code);
             // 将 _输出 变量内容追加到输出管道（函数执行完毕返回 _输出 数据）
             let output_content = self.ctx.val.p.get_cloned("_输出");
-            if !output_content.trim().is_empty() {
-                self.ctx.output.add_print(&output_content.trim_end());
+            let output_trimmed = output_content.trim().to_string();
+            if !output_trimmed.is_empty() {
+                self.ctx.output.add_print(&output_trimmed);
                 self.ctx.output.add_print("\n");
+                // 调试模式：同时通过 DebugEvent 发送 _输出 到调试控制台
+                if let Some(ref dbg) = self.ctx.debug {
+                    let _ = dbg.event_tx.send(crate::debug::DebugEvent::Output(format!("{}\n", output_trimmed)));
+                }
             }
             self.ctx.output.flush_pending();
             let func_print = self.ctx.output.get_print();
