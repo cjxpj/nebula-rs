@@ -729,7 +729,7 @@ fn run_with_shared_val(
         std::mem::swap(&mut ctx.val, &mut sub_ctx.val);
         return None;
     }
-    let output = Some(sub_ctx.output.get());
+    let output = Some(sub_ctx.output.get_print());
     std::mem::swap(&mut ctx.val, &mut sub_ctx.val);
     output
 }
@@ -792,14 +792,18 @@ fn print_core(ctx: &mut DicContext, args: &[String]) -> String {
 /// $打印 内容$ — 输出到管道，不返回值
 fn print_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let result = print_core(ctx, args);
-    ctx.output.add(&format!("{}\n", crate::analyzer::unescape_newline(&result)));
+    let display = crate::analyzer::unescape_newline(&result);
+    ctx.output.add_print(&format!("{}\n", display));
     None
 }
 
-/// $打印返回 内容$ — 输出到管道并返回值
+/// $打印返回 内容$ — 输出到打印管道并返回值（同时写入返回管道）
 fn print_return_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let result = print_core(ctx, args);
-    ctx.output.add(&format!("{}\n", crate::analyzer::unescape_newline(&result)));
+    let display = crate::analyzer::unescape_newline(&result);
+    let formatted = format!("{}\n", display);
+    ctx.output.add_print(&formatted);
+    ctx.output.add_return(&result);
     Some(result)
 }
 
@@ -888,7 +892,7 @@ fn run_server(
     let listener = match TcpListener::bind(&bind_addr) {
         Ok(l) => l,
         Err(e) => {
-            ctx.output.add(&format!("[Nebula] 服务器启动失败: {}\n", e));
+            ctx.output.add_print(&format!("[Nebula] 服务器启动失败: {}\n", e));
             return Some(format!("[错误] {} 服务器启动失败: {}", ctx.sys.file_location(), e));
         }
     };
@@ -899,7 +903,7 @@ fn run_server(
         let stream = match stream {
             Ok(s) => s,
             Err(e) => {
-                ctx.output.add(&format!("[Nebula] 连接错误: {}\n", e));
+                ctx.output.add_print(&format!("[Nebula] 连接错误: {}\n", e));
                 continue;
             }
         };
@@ -1088,7 +1092,7 @@ fn run_server(
                 }
                 let rheader_raw = crate::value::Scope::lookup_display("_设置头部", &req_ctx.val.p, Some(req_ctx.val.g.get_all()));
                 let status_code = crate::value::Scope::lookup_display("_状态码", &req_ctx.val.p, Some(req_ctx.val.g.get_all()));
-                let body = req_ctx.output.get();
+                let body = req_ctx.output.get_print();
                 std::mem::swap(&mut base_ctx.val, &mut req_ctx.val);
                 (body, rheader_raw, status_code)
             } else {
@@ -1216,7 +1220,7 @@ fn handle_tcp_request(
         if !Arc::ptr_eq(&base_ctx.shared, &req_ctx.shared) {
             base_ctx.shared = req_ctx.shared.clone();
         }
-        let output = req_ctx.output.get();
+        let output = req_ctx.output.get_print();
         std::mem::swap(&mut base_ctx.val, &mut req_ctx.val);
         (output, true)
     } else {
@@ -1332,7 +1336,7 @@ fn match_tcp_trigger(base_ctx: &DicContext, trigger: &str) -> String {
                 req_ctx.val.p.set_string(name, val.clone());
             }
             entry(&mut req_ctx, &text);
-            req_ctx.output.get()
+            req_ctx.output.get_print()
         }
         None => String::new(),
     }
@@ -3220,7 +3224,7 @@ fn download_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
             .map_err(|e| format!("读取失败: {}", e))
             .map(|_| ())
     })() {
-        ctx.output.add(&format!("[Nebula] {}\n", e));
+        ctx.output.add_print(&format!("[Nebula] {}\n", e));
         return Some(String::new());
     }
     // 写入文件时加写锁
@@ -3228,7 +3232,7 @@ fn download_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
     match file_lock::with_file_write(&save_path_buf, || std::fs::write(&save_path, &data)) {
         Ok(()) => Some("true".to_string()),
         Err(e) => {
-            ctx.output.add(&format!("[Nebula] {}\n", e));
+            ctx.output.add_print(&format!("[Nebula] {}\n", e));
             Some(String::new())
         }
     }

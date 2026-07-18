@@ -53,9 +53,9 @@ fn load_and_init(file_path: &str) -> Result<interpreter::Nebula, String> {
 fn run_batch(file_path: &str) -> Result<(), String> {
     let mut nb = load_and_init(file_path)?;
     nb.exec_func("main")
-        .map(|output| {
-            if !output.is_empty() {
-                print!("{}", output);
+        .map(|(print_out, _return_val)| {
+            if !print_out.is_empty() {
+                print!("{}", print_out);
             }
         })
 }
@@ -78,10 +78,11 @@ fn run_repl(file_path: &str) -> Result<(), String> {
             continue;
         }
         interpreter::entry(&mut nb.ctx, &[line.to_string()]);
-        let output = nb.ctx.output.get();
+        let output = nb.ctx.output.get_print();
         if !output.is_empty() {
             print!("{}", output);
         }
+        // 返回管道可单独获取：nb.ctx.output.get_return()
         nb.ctx.output.clear();
     }
     Ok(())

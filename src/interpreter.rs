@@ -1,9 +1,10 @@
-﻿use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, mpsc::Sender};
 use crate::value::{DicVal, Scope};
 use crate::parser::{BuildDic, BuildValue};
 use crate::analyzer::val_text_test;
 use crate::file_lock;
+use crate::debug::DebugHandle;
 
 /* ===================== 状态机 ===================== */
 
@@ -13,42 +14,67 @@ type FuncPrefixResult = (Vec<String>, Vec<String>, Vec<Option<String>>, bool, us
 type TriggerResult = (Vec<String>, String, Vec<String>, Vec<String>);
 
 /// 输出累积器
+/// 双管道设计：
+/// - 打印管道（print_parts）：所有需要输出到终端的内容，保持有序
+/// - 返回管道（return_parts）：仅函数返回值（构造函数 handle 等）
+///   每次 add_return 会同时写入打印管道以维持顺序
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct Output {
-    parts: Vec<String>,
-    /// \r 延迟输出缓冲区：\r 后缀的行暂存于此，函数结束时 flush 到 parts
+    print_parts: Vec<String>,
+    return_parts: Vec<String>,
+    /// \r 延迟输出缓冲区：\r 后缀的行暂存于此，函数结束时 flush 到 print_parts
     pending: Vec<String>,
 }
 
 #[allow(dead_code)]
 impl Output {
     pub fn new() -> Self {
-        Output { parts: Vec::new(), pending: Vec::new() }
+        Output { print_parts: Vec::new(), return_parts: Vec::new(), pending: Vec::new() }
     }
-    pub fn add(&mut self, s: &str) {
-        if !s.is_empty() {
-            self.parts.push(s.to_string());
-        }
+
+    /// 写入打印管道
+    pub fn add_print(&mut self, s: &str) {
+        if s.is_empty() { return; }
+        self.print_parts.push(s.to_string());
     }
-    pub fn add_string(&mut self, s: String) {
-        if !s.is_empty() {
-            self.parts.push(s);
-        }
+
+    /// 写入打印管道（String 版本）
+    pub fn add_print_string(&mut self, s: String) {
+        if s.is_empty() { return; }
+        self.print_parts.push(s);
     }
-    pub fn get(&self) -> String {
-        self.parts.join("")
+
+    /// 写入返回管道（同时写入打印管道以保持顺序）
+    pub fn add_return(&mut self, s: &str) {
+        if s.is_empty() { return; }
+        self.print_parts.push(s.to_string());
+        self.return_parts.push(s.to_string());
     }
-    /// 如果最后一个 part 以 \n 结尾，去掉该 \n
+
+    /// 获取打印管道内容
+    pub fn get_print(&self) -> String {
+        self.print_parts.join("")
+    }
+
+    /// 获取返回管道内容
+    pub fn get_return(&self) -> String {
+        self.return_parts.join("")
+    }
+
+    /// 如果最后一个 print_part 以 \n 结尾，去掉该 \n
     pub fn strip_trailing_newline(&mut self) {
-        if let Some(last) = self.parts.last_mut() {
+        if let Some(last) = self.print_parts.last_mut() {
             if last.ends_with('\n') {
                 last.pop();
             }
         }
     }
+
+    /// 清空所有管道
     pub fn clear(&mut self) {
-        self.parts.clear();
+        self.print_parts.clear();
+        self.return_parts.clear();
         self.pending.clear();
     }
 
@@ -56,9 +82,8 @@ impl Output {
 
     /// 将文本加入 \r 延迟缓冲区
     pub fn add_pending(&mut self, s: &str) {
-        if !s.is_empty() {
-            self.pending.push(s.to_string());
-        }
+        if s.is_empty() { return; }
+        self.pending.push(s.to_string());
     }
 
     /// 延迟缓冲区是否非空
@@ -66,21 +91,20 @@ impl Output {
         !self.pending.is_empty()
     }
 
-    /// 将延迟缓冲区的内容追加到正式输出末尾
+    /// 将延迟缓冲区的内容追加到打印管道末尾
     pub fn flush_pending(&mut self) {
-        self.parts.append(&mut self.pending);
+        self.print_parts.append(&mut self.pending);
     }
 
-    /// 返回 parts 的长度，用于捕获函数调用期间的输出增量
-    pub fn parts_len(&self) -> usize {
-        self.parts.len()
+    /// 返回 print_parts 的长度，用于捕获函数调用期间的输出增量
+    pub fn print_len(&self) -> usize {
+        self.print_parts.len()
     }
 
-    /// 将 from_idx 及之后的 parts 移动到 pending 缓冲区
+    /// 将 from_idx 及之后的 print_parts 移动到 pending 缓冲区
     /// \r 语义：确保末尾有 \n（换行），再延迟输出
     pub fn move_tail_to_pending(&mut self, from_idx: usize) {
-        let mut tail: Vec<String> = self.parts.drain(from_idx..).collect();
-        // 确保最后一个 part 以 \n 结尾
+        let mut tail: Vec<String> = self.print_parts.drain(from_idx..).collect();
         if let Some(last) = tail.last_mut() {
             if !last.ends_with('\n') {
                 last.push('\n');
@@ -93,10 +117,10 @@ impl Output {
         }
     }
 
-    /// 仅将最后一个 part 移动到 pending（自动加 \n 保证换行）
+    /// 仅将最后一个 print_part 移动到 pending（自动加 \n 保证换行）
     /// 用于构造函数 \r：构造函数体 $打印$ 立即输出，仅返回值 0x 指针延迟
     pub fn move_last_to_pending(&mut self) {
-        if let Some(last) = self.parts.pop() {
+        if let Some(last) = self.print_parts.pop() {
             if !last.is_empty() {
                 let s = if last.ends_with('\n') { last } else { last + "\n" };
                 self.pending.push(s);
@@ -104,39 +128,39 @@ impl Output {
         }
     }
 
-    /// 将另一个 Output 的 parts 逐个追加到当前 Output
-    /// （避免 get() 拼接导致 $打印$ 的 \n 混入中间）
-    pub fn append_parts_from(&mut self, other: &Output) {
-        for part in &other.parts {
+    /// 将另一个 Output 的 print_parts 逐个追加到当前 Output
+    /// （避免 get_print() 拼接导致 $打印$ 的 \n 混入中间）
+    pub fn append_print_from(&mut self, other: &Output) {
+        for part in &other.print_parts {
             if !part.is_empty() {
-                self.parts.push(part.clone());
+                self.print_parts.push(part.clone());
             }
         }
     }
 
-    /// 从 from_idx 开始快照 parts（不 drain），返回拼接后的字符串
-    pub fn snapshot_from(&self, from_idx: usize) -> String {
-        if from_idx >= self.parts.len() {
+    /// 从 from_idx 开始快照 print_parts（不 drain），返回拼接后的字符串
+    pub fn snapshot_print_from(&self, from_idx: usize) -> String {
+        if from_idx >= self.print_parts.len() {
             return String::new();
         }
-        self.parts[from_idx..].join("")
+        self.print_parts[from_idx..].join("")
     }
 
-    /// 快照 parts[from..to]（不 drain），返回拼接后的字符串
-    pub fn snapshot_range(&self, from: usize, to: usize) -> String {
-        if from >= self.parts.len() || to <= from {
+    /// 快照 print_parts[from..to]（不 drain），返回拼接后的字符串
+    pub fn snapshot_print_range(&self, from: usize, to: usize) -> String {
+        if from >= self.print_parts.len() || to <= from {
             return String::new();
         }
-        let to = to.min(self.parts.len());
-        self.parts[from..to].join("")
+        let to = to.min(self.print_parts.len());
+        self.print_parts[from..to].join("")
     }
 
-    /// 从 from_idx 开始 drain parts 并返回拼接后的字符串
-    pub fn drain_from(&mut self, from_idx: usize) -> String {
-        if from_idx >= self.parts.len() {
+    /// 从 from_idx 开始 drain print_parts 并返回拼接后的字符串
+    pub fn drain_print_from(&mut self, from_idx: usize) -> String {
+        if from_idx >= self.print_parts.len() {
             return String::new();
         }
-        let drained: Vec<String> = self.parts.drain(from_idx..).collect();
+        let drained: Vec<String> = self.print_parts.drain(from_idx..).collect();
         drained.join("")
     }
 
@@ -255,8 +279,8 @@ pub struct DicContext {
     pub shared: Arc<SharedContext>,
     /// 正在加载的目录路径，防止 #引入= 循环递归
     pub reloading_dirs: HashSet<String>,
-    /// DAP 调试模式：println! 改走 ctx.output 避免污染 stdout 协议通道
-    pub debug_mode: bool,
+    /// DAP 调试句柄：统一封装调试模式所需的共享状态和通信通道
+    pub debug: Option<DebugHandle>,
 }
 
 #[derive(Debug, Clone)]
@@ -302,7 +326,7 @@ impl DicContext {
             output: Output::new(),
             shared: Arc::new(shared),
             reloading_dirs: HashSet::new(),
-            debug_mode: false,
+            debug: None,
         };
         crate::functions::register_builtins(&mut ctx);
         ctx
@@ -586,7 +610,7 @@ impl DicContext {
                 actual_path = try_nr;
             } else {
                 let file_info = self.sys.file_location();
-                self.output.add(&format!("[错误] {}引入文件不存在或不为 .nr 文件：{}（#引入={}）\n", file_info, actual_path, path));
+                self.output.add_print(&format!("[错误] {}引入文件不存在或不为 .nr 文件：{}（#引入={}）\n", file_info, actual_path, path));
                 self.sys.stop = true;
                 return;
             }
@@ -600,7 +624,7 @@ impl DicContext {
             // 防递归：若该文件正在加载中，报错
             if !self.reloading_dirs.insert(canon_str.clone()) {
                 let file_info = self.sys.file_location();
-                self.output.add(&format!("[错误] {}循环引入：{}（#引入={}）\n", file_info, actual_path, path));
+                self.output.add_print(&format!("[错误] {}循环引入：{}（#引入={}）\n", file_info, actual_path, path));
                 self.sys.stop = true;
                 return;
             }
@@ -639,7 +663,7 @@ impl DicContext {
         let dir = std::path::Path::new(dir_path);
         if !dir.is_dir() {
             let file_info = self.sys.file_location();
-            self.output.add(&format!("[错误] {}引入目标不存在：{}（#引入={}）\n", file_info, dir_path, dir_path));
+            self.output.add_print(&format!("[错误] {}引入目标不存在：{}（#引入={}）\n", file_info, dir_path, dir_path));
             self.sys.stop = true;
             return;
         }
@@ -648,7 +672,7 @@ impl DicContext {
         let canon_str = canon.to_string_lossy().to_string();
         if !self.reloading_dirs.insert(canon_str.clone()) {
             let file_info = self.sys.file_location();
-            self.output.add(&format!("[错误] {}循环引入：{}（#引入={}）\n", file_info, dir_path, dir_path));
+            self.output.add_print(&format!("[错误] {}循环引入：{}（#引入={}）\n", file_info, dir_path, dir_path));
             self.sys.stop = true;
             return;
         }
@@ -699,7 +723,7 @@ impl DicContext {
             }
             Err(e) => {
                 let file_info = self.sys.file_location();
-                self.output.add(&format!("{} {}\n", file_info, e));
+                self.output.add_print(&format!("{} {}\n", file_info, e));
                 self.sys.stop = true;
             }
         }
@@ -777,9 +801,9 @@ impl DicContext {
         let handle = crate::functions::pool_alloc_instance(&class_spec);
         self.save_ctor_instance_vars(&sub_ctx, &handle);
 
-        let output = sub_ctx.output.get();
+        let output = sub_ctx.output.get_print();
         if !output.is_empty() {
-            self.output.add(&crate::analyzer::unescape_newline(&output));
+            self.output.add_print(&crate::analyzer::unescape_newline(&output));
         }
 
         handle
@@ -1154,7 +1178,7 @@ impl DicContext {
                                 } else {
                                     // 实例变量持久化：保存 .field 回主上下文
                                     self.save_instance_vars(&sub_ctx, raw_obj, &resolved_obj);
-                                    result.push_str(&sub_ctx.output.get());
+                                    result.push_str(&sub_ctx.output.get_print());
                                 }
                             } else {
                                 // 尝试作为类名.内置函数调用（如 $.回调 → Counter.回调 → 调用 回调 内置函数）
@@ -1264,7 +1288,7 @@ impl DicContext {
                             entry(&mut sub_ctx, &code);
                             // 指针变量回写
                             crate::functions::writeback_ptr_vars(self, &sub_ctx, &args[1..], &param_names, 0);
-                            result.push_str(&sub_ctx.output.get());
+                            result.push_str(&sub_ctx.output.get_print());
                         }
                     } else {
                         // 跨函数调用 —— 全新变量上下文，变量隔离
@@ -1340,7 +1364,7 @@ impl DicContext {
                             entry(&mut sub_ctx, &code);
                             // 指针变量回写
                             crate::functions::writeback_ptr_vars(self, &sub_ctx, &args[1..], &param_names, 0);
-                            result.push_str(&sub_ctx.output.get());
+                            result.push_str(&sub_ctx.output.get_print());
                         }
                     }
                 } else {
@@ -1378,6 +1402,7 @@ impl DicContext {
         ctx.sys.for_each.success = false;
         ctx.sys.func_state.success = false;
         ctx.sys.pending_goto = None;
+        ctx.debug = None;
         ctx
     }
 
@@ -1403,7 +1428,7 @@ impl DicContext {
                 init_lines: Vec::new(),
             }),
             reloading_dirs: self.reloading_dirs.clone(),
-            debug_mode: self.debug_mode,
+            debug: None,
         }
     }
 
@@ -1510,6 +1535,17 @@ impl crate::iftext::CondEval for DicContext {
 pub fn entry(ctx: &mut DicContext, txt: &[String]) {
     match crate::executor::parse_stmts(txt, false, ctx.sys.line_offset, &ctx.sys.source_file) {
         Ok(stmts) => {
+            if let Some(ref dbg) = ctx.debug {
+                let debug_ctx = crate::executor::DebugContext {
+                    shared: Arc::clone(&dbg.shared),
+                    event_tx: Sender::clone(&dbg.event_tx),
+                    cmd_rx: Arc::clone(&dbg.cmd_rx),
+                    depth: 0,
+                    defer_output: false,
+                };
+                crate::executor::exec_stmts(ctx, &stmts, Some(&debug_ctx));
+                return;
+            }
             crate::executor::exec_stmts(ctx, &stmts, None);
         }
         Err(e) => {
@@ -1603,7 +1639,7 @@ impl Nebula {
                     self.ctx.val.p.set_string(name, val.clone());
                 }
                 entry(&mut self.ctx, &item.text);
-                return Ok(self.ctx.output.get());
+                return Ok(self.ctx.output.get_print());
             }
             // 无括号捕获的精确匹配
             let escaped = regex::escape(&item.trigger);
@@ -1612,7 +1648,7 @@ impl Nebula {
                     self.ctx.val.p.set_string("触发", item.trigger.clone());
                     self.ctx.val.p.set_string("行数", i.to_string());
                     entry(&mut self.ctx, &item.text);
-                    return Ok(self.ctx.output.get());
+                    return Ok(self.ctx.output.get_print());
                 }
             }
             if escaped != item.trigger {
@@ -1627,7 +1663,7 @@ impl Nebula {
                             }
                         }
                         entry(&mut self.ctx, &item.text);
-                        return Ok(self.ctx.output.get());
+                        return Ok(self.ctx.output.get_print());
                     }
                 }
             }
@@ -1636,38 +1672,59 @@ impl Nebula {
     }
 
     /// 执行 [函数] 块
-    pub fn exec_func(&mut self, func_name: &str) -> Result<String, String> {
+    /// 返回 (print_output, return_value)
+    pub fn exec_func(&mut self, func_name: &str) -> Result<(String, String), String> {
         if let Some((code, param_names, _defaults, _is_variadic, func_line)) = self.ctx.find_func_prefix(func_name)
             .or_else(|| self.ctx.find_internal(func_name).map(|c| (c, Vec::new(), Vec::new(), false, 0)))
         {
             self.ctx.sys.line_offset = func_line;
-            let head_output = self.ctx.output.get();
+            let head_print = self.ctx.output.get_print();
+            let head_return = self.ctx.output.get_return();
             self.ctx.output.clear();
             // 检查 load/init 阶段是否有致命错误（#引入= 等）
             if let Some(err) = self.ctx.sys.error.take() {
                 return Err(err);
             }
             if self.ctx.sys.stop {
-                return Err(head_output.trim_end().to_string());
+                return Err(head_print.trim_end().to_string());
             }
             let fn_name_s = func_name.to_string();
             self.ctx.val.p.set_string("触发", fn_name_s.clone());
             self.ctx.val.p.set_string("self", fn_name_s.clone());
             self.ctx.val.p.set_string("参数0", fn_name_s);
+            self.ctx.val.p.set_string("_输出", String::new());
             // 初始化命名参数为空字符串
             for p in &param_names {
                 self.ctx.val.p.set_string(p, String::new());
             }
             entry(&mut self.ctx, &code);
-            self.ctx.output.flush_pending();
-            let func_output = self.ctx.output.get();
-            if head_output.is_empty() {
-                Ok(func_output)
-            } else if func_output.is_empty() {
-                Ok(head_output)
-            } else {
-                Ok(format!("{}\n{}", head_output, func_output))
+            // 将 _输出 变量内容追加到输出管道（函数执行完毕返回 _输出 数据）
+            let output_content = self.ctx.val.p.get_cloned("_输出");
+            if !output_content.trim().is_empty() {
+                self.ctx.output.add_print(&output_content.trim_end());
+                self.ctx.output.add_print("\n");
             }
+            self.ctx.output.flush_pending();
+            let func_print = self.ctx.output.get_print();
+            let func_return = self.ctx.output.get_return();
+
+            let print_out = if head_print.is_empty() {
+                func_print
+            } else if func_print.is_empty() {
+                head_print
+            } else {
+                format!("{}\n{}", head_print.trim_end(), func_print)
+            };
+
+            let return_val = if head_return.is_empty() {
+                func_return
+            } else if func_return.is_empty() {
+                head_return
+            } else {
+                format!("{}\n{}", head_return.trim_end(), func_return)
+            };
+
+            Ok((print_out, return_val))
         } else {
             Err(format!("函数 '{}' 未找到", func_name))
         }
@@ -1678,6 +1735,6 @@ impl Nebula {
         for item in &self.build.dic {
             entry(&mut self.ctx, &item.text);
         }
-        self.ctx.output.get()
+        self.ctx.output.get_print()
     }
 }

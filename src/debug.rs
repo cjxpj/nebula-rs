@@ -107,7 +107,7 @@ pub struct StackFrame {
 
 /// 步进意图（暂停后消费步进命令时暂存，供下一条语句检查）
 #[derive(Debug, Clone)]
-enum StepIntent {
+pub enum StepIntent {
     StepIn,
     StepOver(usize),
     StepOut(usize),
@@ -116,6 +116,7 @@ enum StepIntent {
 /* ===================== 调试共享状态 ===================== */
 
 /// 由 executor 写入、DAP 线程读取的轻量共享状态
+#[derive(Debug)]
 pub struct SharedDebugState {
     /// 断点: 文件路径 → 行号集合
     pub breakpoints: HashMap<String, HashSet<usize>>,
@@ -132,7 +133,11 @@ pub struct SharedDebugState {
     /// 嵌套引用计数器
     next_nested_ref: u64,
     /// 暂停期间收到的步进命令，留给恢复后的第一条语句使用
-    step_pending: Option<StepIntent>,
+    pub(crate) step_pending: Option<StepIntent>,
+    /// stopOnEntry：在 main 入口处自动暂停
+    pub stop_on_entry: bool,
+    /// 被调试程序文件的规范化路径（与 executor 中 source_file 一致）
+    pub program_path: String,
 }
 
 impl SharedDebugState {
@@ -149,8 +154,21 @@ impl SharedDebugState {
             nested_var_map: HashMap::new(),
             next_nested_ref: 1_000_000,
             step_pending: None,
+            stop_on_entry: false,
+            program_path: String::new(),
         }
     }
+}
+
+/* ===================== 调试句柄 ===================== */
+
+/// 调试模式句柄：统一封装 DAP 通信所需的三要素
+/// 替代 DicContext 中分散的 debug_mode / debug_shared / debug_event_tx / debug_cmd_rx
+#[derive(Debug, Clone)]
+pub struct DebugHandle {
+    pub shared: Arc<Mutex<SharedDebugState>>,
+    pub event_tx: Sender<DebugEvent>,
+    pub cmd_rx: Arc<Mutex<Receiver<DebugCommand>>>,
 }
 
 /* ===================== DAP 协议读写 ===================== */
@@ -228,6 +246,8 @@ fn dap_response(seq: i64, command: &str, request_seq: i64, success: bool, body: 
 /* ===================== DAP 服务端主循环 ===================== */
 
 pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
+    eprintln!("[DAP] run_dap_server start, file_path={:?}", file_path);
+
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut reader = io::BufReader::new(stdin.lock());
@@ -247,7 +267,15 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
 
     // 如果启动时就指定了文件路径，提前加载
     if let Some(fp) = file_path {
+        eprintln!("[DAP] pre-loading file: {}", fp);
         let nb = interpreter::Nebula::from_file(fp)?;
+        // 捕获规范化后的源文件路径（供 setBreakpoints 路径匹配用）
+        {
+            let mut ds = shared.lock().unwrap();
+            ds.program_path = nb.ctx.sys.source_file.clone();
+            eprintln!("[DAP] program_path = {}", ds.program_path);
+        }
+        eprintln!("[DAP] file loaded, spawning executor thread");
         let et = event_tx.clone();
         let cr = cmd_rx_opt.take().unwrap(); // 安全：此处一定为 Some
         executor_handle = Some(thread::spawn(move || {
@@ -259,12 +287,15 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
     let mut launched = false;
     let mut launch_failed = false;
 
+    eprintln!("[DAP] entering main loop, waiting for DAP client...");
+
     // DAP 主循环（非阻塞轮询模式：避免 blocking read 导致 Terminated 事件无法处理）
     loop {
         // 1) 处理 executor 发来的事件（全部排空）
         loop {
             match event_rx.try_recv() {
                 Ok(DebugEvent::Stopped { reason, _file, _line }) => {
+                    eprintln!("[DAP] event: Stopped reason={} file={} line={}", reason, _file, _line);
                     let fname = _file.rsplit(&['\\', '/'][..]).next().unwrap_or(&_file);
                     let ev = json!({
                         "type": "event",
@@ -292,6 +323,7 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
                     send_message(&mut writer, &ev);
                 }
                 Ok(DebugEvent::Terminated) => {
+                    eprintln!("[DAP] event: Terminated");
                     let ev = json!({
                         "type": "event", "seq": seq, "event": "terminated"
                     });
@@ -331,8 +363,11 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
         let request_seq = msg.get("seq").and_then(|v| v.as_i64()).unwrap_or(0);
         let args = msg.get("arguments");
 
+        eprintln!("[DAP] request: {} seq={}", command, request_seq);
+
         match command {
             "initialize" => {
+                eprintln!("[DAP] handling initialize");
                 seq += 1;
                 send_message(&mut writer, &dap_response(seq, "initialize", request_seq, true,
                     Some(json!({
@@ -355,6 +390,15 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
             }
 
             "launch" => {
+                // 读取 stopOnEntry 选项（无论预加载还是延迟加载都需要）
+                let stop_on_entry = args
+                    .and_then(|a| a.get("stopOnEntry"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if stop_on_entry {
+                    shared.lock().unwrap().stop_on_entry = true;
+                }
+
                 // 如果没有预加载（启动时未传文件），从 launch args 中获取文件并初始化 executor
                 if !launched && executor_handle.is_none() {
                     let program = args
@@ -365,6 +409,12 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
                     if !program.is_empty() {
                         match interpreter::Nebula::from_file(program) {
                             Ok(nb) => {
+                                // 捕获规范化后的源文件路径
+                                {
+                                    let mut ds = shared.lock().unwrap();
+                                    ds.program_path = nb.ctx.sys.source_file.clone();
+                                    eprintln!("[DAP] launch program_path = {}", ds.program_path);
+                                }
                                 launched = true;
                                 let sc = shared.clone();
                                 let et = event_tx_clone.clone();
@@ -409,12 +459,21 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
                     .to_string();
 
                 // 规范化路径，确保与 executor 中 ctx.sys.source_file 匹配
-                // Windows: canonicalize 保证路径大小写一致，再去除 \\?\ 前缀
-                let source_path =
-                    std::path::Path::new(&raw_path)
-                        .canonicalize()
-                        .map(|p| clean_path(&p.to_string_lossy()))
-                        .unwrap_or(raw_path);
+                // 策略：1) 直接 canonicalize  2) 相对 program 目录解析  3) clean_path 兜底
+                let source_path = {
+                    let p = std::path::Path::new(&raw_path);
+                    p.canonicalize()
+                        .or_else(|_| {
+                            let ds = shared.lock().unwrap();
+                            let prog_dir = std::path::Path::new(&ds.program_path)
+                                .parent()
+                                .unwrap_or(std::path::Path::new("."));
+                            prog_dir.join(&raw_path).canonicalize()
+                        })
+                        .map(|abs| clean_path(&abs.to_string_lossy()))
+                        .unwrap_or_else(|_| clean_path(&raw_path))
+                };
+                eprintln!("[DAP] setBreakpoints raw={} resolved={}", raw_path, source_path);
 
                 let bp_list = args
                     .and_then(|a| a.get("breakpoints"))
@@ -442,11 +501,13 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
             }
 
             "configurationDone" => {
+                eprintln!("[DAP] configurationDone: sending Continue to executor");
                 seq += 1;
                 send_message(&mut writer, &dap_response(seq, "configurationDone", request_seq, true, None));
                 if !launch_failed {
                     // 通知 executor 开始执行
                     let _ = cmd_tx.send(DebugCommand::Continue);
+                    eprintln!("[DAP] Continue sent to executor");
                 }
             }
 
@@ -581,7 +642,7 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
                         .unwrap_or_default();
 
                     let mut ds = shared.lock().unwrap();
-                     ds.nested_var_map = new_nested;
+                    ds.nested_var_map.extend(new_nested);
                      ds.next_nested_ref = next_ref;
                      drop(ds);
 
@@ -732,8 +793,8 @@ fn build_nested_vars(
 
 /// 截断过长值
 fn truncate_val(val: &str) -> String {
-    if val.chars().count() > 200 {
-        format!("{}...", val.chars().take(200).collect::<String>())
+    if val.chars().count() > 5000 {
+        format!("{}...", val.chars().take(5000).collect::<String>())
     } else {
         val.to_string()
     }
@@ -744,7 +805,7 @@ fn truncate_val(val: &str) -> String {
 pub fn check_debug_before_exec(
     shared: &Arc<Mutex<SharedDebugState>>,
     event_tx: &Sender<DebugEvent>,
-    cmd_rx: &Receiver<DebugCommand>,
+    cmd_rx: &Arc<Mutex<Receiver<DebugCommand>>>,
     file: &str,
     line: usize,
     depth: usize,
@@ -793,7 +854,7 @@ pub fn check_debug_before_exec(
         pause
     } else {
         // 检查是否有待处理的步进命令
-        match cmd_rx.try_recv() {
+        match cmd_rx.lock().unwrap().try_recv() {
             Ok(DebugCommand::Continue) => false,
             Ok(DebugCommand::Pause) => true,
             Ok(DebugCommand::Next(step_depth)) => {
@@ -809,7 +870,9 @@ pub fn check_debug_before_exec(
         }
     };
 
+    eprintln!("[DBG] check file={} line={} depth={} at_bp={}", file, line, depth, at_breakpoint);
     if need_pause {
+        eprintln!("[DBG] PAUSING at {}:{} reason={}", file, line, if at_breakpoint { "breakpoint" } else { "step" });
         ds.paused = true;
         ds.step_pending = None; // 暂停时清除步进意图
 
@@ -831,7 +894,7 @@ pub fn check_debug_before_exec(
 
         // 阻塞等待恢复命令
         loop {
-            match cmd_rx.recv() {
+            match cmd_rx.lock().unwrap().recv() {
                 Ok(DebugCommand::Continue) => {
                     let mut ds = shared.lock().unwrap();
                     ds.paused = false;

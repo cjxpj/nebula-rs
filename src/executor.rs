@@ -17,6 +17,8 @@
 //   TextBlock:  ''' ... '''
 //   AsyncOutput: #: 直接打印
 
+use std::collections::HashMap;
+
 use crate::analyzer::val_text_test;
 use crate::ast::*;
 use crate::count;
@@ -30,7 +32,7 @@ use crate::interpreter::DicContext;
 
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use crate::debug::{self, DebugCommand, DebugEvent, SharedDebugState, StackFrame};
+use crate::debug::{self, DebugCommand, DebugEvent, DebugHandle, SharedDebugState, StackFrame};
 use crate::interpreter::Nebula;
 
 /* ===================== 执行结果 ===================== */
@@ -51,10 +53,11 @@ pub enum ExecResult {
 /* ===================== 调试上下文 ===================== */
 
 /// 调试上下文：通过 Option<&DebugContext> 开关控制调试行为
-pub struct DebugContext<'a> {
-    pub shared: &'a Arc<Mutex<SharedDebugState>>,
-    pub event_tx: &'a Sender<DebugEvent>,
-    pub cmd_rx: &'a Receiver<DebugCommand>,
+#[derive(Clone)]
+pub struct DebugContext {
+    pub shared: Arc<Mutex<SharedDebugState>>,
+    pub event_tx: Sender<DebugEvent>,
+    pub cmd_rx: Arc<Mutex<Receiver<DebugCommand>>>,
     pub depth: usize,
     /// 为 true 时，子上下文中的 Output 不立即发送 DebugEvent::Output，
     /// 而是保留在 output 中由调用者统一处理（用于 \r 链延迟输出场景）
@@ -241,6 +244,7 @@ fn parse_one(lines: &[String], idx: usize, stmts: &mut Vec<Stmt>, line_offset: u
                     target,
                     op,
                     expr,
+                    no_newline: false,
                 });
                 return Ok(1);
             }
@@ -269,32 +273,42 @@ fn parse_one(lines: &[String], idx: usize, stmts: &mut Vec<Stmt>, line_offset: u
                     target: v_prefix.clone(),
                     op: AssignOp::Set,
                     expr: Expr::Lit(Value::Str(marker.to_string())),
+                    no_newline: false,
                 });
             } else if v_type == 6 && (v_suffix == "{" || v_suffix == "[") {
                 // 行内 JSON 块: key:{ ... } 或 key:[ ... ]
                 return parse_inline_json_block(lines, idx, stmts, &v_prefix, &v_suffix, line_offset, source_file);
             } else if v_type == 6 && v_prefix.contains('[') {
                 // JSON 路径赋值: key[sub]...:value
-                let expr = parse_assign_expr(&v_suffix);
+                let no_newline = v_suffix.ends_with("\\r");
+                let suffix = if no_newline { &v_suffix[..v_suffix.len() - 2] } else { v_suffix.as_str() };
+                let expr = parse_assign_expr(suffix);
                 stmts.push(Stmt::Assign {
                     target: v_prefix.clone(),
                     op,
                     expr,
+                    no_newline,
                 });
             } else if v_type == 5 {
                 // :: — 纯文本赋值：不解析表达式，将右侧原样存为字面量
-                let expr = Expr::Lit(Value::Str(v_suffix.clone()));
+                let no_newline = v_suffix.ends_with("\\r");
+                let suffix = if no_newline { &v_suffix[..v_suffix.len() - 2] } else { v_suffix.as_str() };
+                let expr = Expr::Lit(Value::Str(suffix.to_string()));
                 stmts.push(Stmt::Assign {
                     target: v_prefix.clone(),
                     op,
                     expr,
+                    no_newline,
                 });
             } else {
-                let expr = parse_assign_expr(&v_suffix);
+                let no_newline = v_suffix.ends_with("\\r");
+                let suffix = if no_newline { &v_suffix[..v_suffix.len() - 2] } else { v_suffix.as_str() };
+                let expr = parse_assign_expr(suffix);
                 stmts.push(Stmt::Assign {
                     target: v_prefix.clone(),
                     op,
                     expr,
+                    no_newline,
                 });
             }
         }
@@ -562,6 +576,7 @@ fn parse_inline_json_block(
                 target: var_name.to_string(),
                 op: AssignOp::Set,
                 expr: Expr::Lit(Value::Str(json_str)),
+                no_newline: false,
             });
             return Ok(i - idx + 1);
         }
@@ -813,6 +828,30 @@ fn parse_assign_expr(raw: &str) -> Expr {
         }
     }
 
+    // $func args$ 函数调用（支持末尾 \\r）
+    if raw.starts_with('$') {
+        let raw_content: &str = if let Some(stripped) = raw.strip_suffix("$\\r") {
+            &stripped[1..] // 去掉前导 $
+        } else if raw.ends_with('$') && raw.len() > 1 {
+            &raw[1..raw.len() - 1] // 去掉前后 $
+        } else {
+            return Expr::Lit(Value::Str(raw.to_string()));
+        };
+        if raw_content.is_empty() {
+            return Expr::Lit(Value::Str(raw.to_string()));
+        }
+        let args: Vec<String> = crate::analyzer::split_with_escape(raw_content);
+        if args.is_empty() {
+            return Expr::Lit(Value::Str(raw.to_string()));
+        }
+        let name = args[0].clone();
+        let rest: Vec<Expr> = args[1..]
+            .iter()
+            .map(|a| Expr::Lit(Value::Str(a.clone())))
+            .collect();
+        return Expr::Call { name, args: rest };
+    }
+
     // 默认为字面量字符串
     Expr::Lit(Value::Str(raw.to_string()))
 }
@@ -1011,35 +1050,18 @@ pub fn exec_stmts(ctx: &mut DicContext, stmts: &[Stmt], debug: Option<&DebugCont
 
 /* ===================== 调试模式执行器 ===================== */
 
-/// 调试模式入口：加载 Nebula 脚本并启动调试执行
+/// 调试模式入口：注入 debug 上下文到 ctx，复用统一的 exec_init / exec_func 入口
 pub fn run_debug_executor(
     mut nb: Nebula,
     shared: Arc<Mutex<SharedDebugState>>,
     event_tx: Sender<DebugEvent>,
     cmd_rx: Receiver<DebugCommand>,
 ) {
-    nb.ctx.debug_mode = true;
+    nb.ctx.debug = Some(DebugHandle { shared: shared.clone(), event_tx: event_tx.clone(), cmd_rx: Arc::new(Mutex::new(cmd_rx)) });
+
     nb.load();
 
-    let init_lines = std::mem::take(&mut Arc::make_mut(&mut nb.ctx.shared).init_lines);
-    nb.ctx.sys.line_offset = 0;
-
-    match cmd_rx.recv() {
-        Ok(DebugCommand::Continue) | Ok(DebugCommand::StepIn) => {}
-        _ => {
-            let _ = event_tx.send(DebugEvent::Terminated);
-            return;
-        }
-    }
-
-    let debug_ctx = DebugContext {
-        shared: &shared,
-        event_tx: &event_tx,
-        cmd_rx: &cmd_rx,
-        depth: 0,
-        defer_output: false,
-    };
-
+    // 初始化调用栈（main 帧）
     {
         let mut ds = shared.lock().unwrap();
         ds.current_file = nb.ctx.sys.source_file.clone();
@@ -1053,51 +1075,99 @@ pub fn run_debug_executor(
         }];
     }
 
-    if !init_lines.is_empty() {
-        let result = exec_stmts_with_debug_wrapper(&mut nb.ctx, &init_lines, &debug_ctx);
-        if matches!(result, ExecResult::Stop) {
-            let _ = event_tx.send(DebugEvent::Terminated);
-            return;
+    // 等待 DAP configurationDone → Continue
+    {
+        let guard = nb.ctx.debug.as_ref().unwrap().cmd_rx.lock().unwrap();
+        match guard.recv() {
+            Ok(DebugCommand::Continue) | Ok(DebugCommand::StepIn) => {}
+            _ => {
+                let _ = event_tx.send(DebugEvent::Terminated);
+                return;
+            }
         }
     }
 
-    // 查找并执行 main 函数
-    let main_info =
-        nb.ctx.find_func_prefix("main")
-            .or_else(|| nb.ctx.find_internal("main").map(|code| (code, Vec::new(), Vec::new(), false, 0)));
+    nb.exec_init();
 
-    if let Some((code, func_line)) = main_info.map(|(code, _, _, _, fl)| (code, fl)) {
-        nb.ctx.sys.line_offset = func_line;
-
-        {
-            let mut ds = shared.lock().unwrap();
-            ds.current_file = nb.ctx.sys.source_file.clone();
-            ds.depth = 0;
-            ds.call_stack = vec![StackFrame {
-                id: 0,
-                name: "main".to_string(),
-                file: ds.current_file.clone(),
-                line: func_line,
-                scope_chain: Vec::new(),
-            }];
+    // stopOnEntry：在 main 入口处自动暂停
+    {
+        let do_stop = shared.lock().unwrap().stop_on_entry;
+        if do_stop {
+            let entry_file = nb.ctx.sys.source_file.clone();
+            // 找到 main 函数第一条语句的行号
+            let entry_line = if let Some((_, _, _, _, func_line)) = nb.ctx.find_func_prefix("main") {
+                func_line + 1
+            } else {
+                1
+            };
+            // 收集当前作用域链，避免 stopOnEntry 时显示空变量
+            let scope_chain: Vec<(String, HashMap<String, String>)> = nb.ctx.val.p.collect_chain_vars()
+                .into_iter()
+                .map(|(name, map)| {
+                    let filtered: HashMap<String, String> = map.into_iter()
+                        .filter(|(k, _)| !is_internal_variable(k))
+                        .map(|(k, v)| (k, v.display()))
+                        .collect();
+                    (name, filtered)
+                })
+                .collect();
+            {
+                let mut ds = shared.lock().unwrap();
+                ds.scope_chain = scope_chain.clone();
+                ds.current_file = entry_file.clone();
+                ds.current_line = entry_line;
+                ds.paused = true;
+                if let Some(top) = ds.call_stack.last_mut() {
+                    top.scope_chain = scope_chain;
+                    top.line = entry_line;
+                    top.file = entry_file.clone();
+                }
+            }
+            let _ = event_tx.send(DebugEvent::Stopped {
+                reason: "entry".to_string(),
+                _file: entry_file,
+                _line: entry_line,
+            });
+            // 阻塞等待恢复命令
+            loop {
+                let guard = nb.ctx.debug.as_ref().unwrap().cmd_rx.lock().unwrap();
+                match guard.recv() {
+                    Ok(DebugCommand::Continue) => {
+                        let mut ds = shared.lock().unwrap();
+                        ds.paused = false;
+                        ds.step_pending = None;
+                        break;
+                    }
+                    Ok(DebugCommand::Next(d)) => {
+                        let mut ds = shared.lock().unwrap();
+                        ds.paused = false;
+                        ds.step_pending = Some(debug::StepIntent::StepOver(d));
+                        break;
+                    }
+                    Ok(DebugCommand::StepIn) => {
+                        let mut ds = shared.lock().unwrap();
+                        ds.paused = false;
+                        ds.step_pending = Some(debug::StepIntent::StepIn);
+                        break;
+                    }
+                    Ok(DebugCommand::StepOut(d)) => {
+                        let mut ds = shared.lock().unwrap();
+                        ds.paused = false;
+                        ds.step_pending = Some(debug::StepIntent::StepOut(d));
+                        break;
+                    }
+                    Ok(DebugCommand::Pause) => {}
+                    Err(_) => {
+                        let _ = event_tx.send(DebugEvent::Terminated);
+                        return;
+                    }
+                }
+            }
         }
-
-        exec_stmts_with_debug_wrapper(&mut nb.ctx, &code, &debug_ctx);
     }
 
+    let _ = nb.exec_func("main");
     let _ = event_tx.send(DebugEvent::Terminated);
-}
-
-/// 解析代码块并用 debug 上下文执行
-fn exec_stmts_with_debug_wrapper(ctx: &mut DicContext, code: &[String], debug: &DebugContext) -> ExecResult {
-    let stmts = match parse_stmts(code, false, ctx.sys.line_offset, &ctx.sys.source_file) {
-        Ok(s) => s,
-        Err(e) => {
-            ctx.output.add(&e);
-            return ExecResult::Continue;
-        }
-    };
-    exec_stmts(ctx, &stmts, Some(debug))
 }
 
 /// 判断是否为内部变量（不应在调试器变量面板中显示）
@@ -1105,28 +1175,15 @@ fn is_internal_variable(name: &str) -> bool {
     if name == "self" || name == "触发" || name == "触发响应" || name == "行数" {
         return true;
     }
-    if name.starts_with("参数") && name.len() > 6 {
-        let suffix = &name[6..];
-        if suffix.chars().all(|c| c.is_ascii_digit()) {
-            return true;
-        }
-    }
+    // 括号N 是内部语法占位符，不显示
     if name.starts_with("括号") && name.len() > 6 {
         let suffix = &name[6..];
         if suffix.chars().all(|c| c.is_ascii_digit()) {
             return true;
         }
     }
-    if name.starts_with('*') {
-        return true;
-    }
-    if name.starts_with('.') {
-        return true;
-    }
+    // 0x 开头的变量名是内部池句柄，不显示
     if name.starts_with("0x") {
-        return true;
-    }
-    if name.starts_with('_') {
         return true;
     }
     false
@@ -1145,11 +1202,11 @@ fn collect_all_labels(stmts: &[Stmt]) -> std::collections::HashMap<String, isize
 }
 
 /// 创建子块调试上下文（深度 +1，保持 defer_output）
-fn sub_debug_for<'a>(debug: Option<&'a DebugContext<'a>>) -> Option<DebugContext<'a>> {
+fn sub_debug_for(debug: Option<&DebugContext>) -> Option<DebugContext> {
     debug.map(|dbg| DebugContext {
-        shared: dbg.shared,
-        event_tx: dbg.event_tx,
-        cmd_rx: dbg.cmd_rx,
+        shared: Arc::clone(&dbg.shared),
+        event_tx: dbg.event_tx.clone(),
+        cmd_rx: Arc::clone(&dbg.cmd_rx),
         depth: dbg.depth + 1,
         defer_output: dbg.defer_output,
     })
@@ -1215,7 +1272,7 @@ fn exec_stmts_impl(
                 .collect();
 
             if !debug::check_debug_before_exec(
-                debug_ctx.shared, debug_ctx.event_tx, debug_ctx.cmd_rx,
+                &debug_ctx.shared, &debug_ctx.event_tx, &debug_ctx.cmd_rx,
                 &file, line, debug_ctx.depth, &scope_chain, is_func_call,
             ) {
                 return ExecResult::Stop;
@@ -1224,22 +1281,35 @@ fn exec_stmts_impl(
 
         match stmt {
             Stmt::Output(text) => {
-                let parts_before = ctx.output.parts_len();
+                let parts_before = ctx.output.print_len();
                 exec_output(ctx, text);
                 // Debug: 非 \r 输出立即发送（\r 输出进 pending，函数末尾 flush 时发送）
                 // defer_output 为 true 时跳过实时发送，由父调用者统一处理
                 if let Some(debug_ctx) = debug {
-                    if !debug_ctx.defer_output && ctx.output.parts_len() > parts_before {
-                        let new_out = ctx.output.snapshot_from(parts_before);
+                    if !debug_ctx.defer_output && ctx.output.print_len() > parts_before {
+                        let new_out = ctx.output.snapshot_print_from(parts_before);
                         if !new_out.is_empty() {
                             let _ = debug_ctx.event_tx.send(DebugEvent::Output(new_out));
-                            debug_sent = ctx.output.parts_len();
+                            debug_sent = ctx.output.print_len();
                         }
                     }
                 }
             }
-            Stmt::Assign { target, op, expr } => {
+            Stmt::Assign { target, op, expr, no_newline } => {
+                let parts_before = ctx.output.print_len();
                 exec_assign(ctx, target, op, expr);
+                // \r 语义：赋值表达式仅将值存入变量，不产生额外输出
+                // （\r 后缀表示此行不自动换行，对赋值无输出影响）
+                // Debug: 发送非 \r 的新增输出
+                if let Some(debug_ctx) = debug {
+                    if !debug_ctx.defer_output && !*no_newline && ctx.output.print_len() > parts_before {
+                        let new_out = ctx.output.snapshot_print_from(parts_before);
+                        if !new_out.is_empty() {
+                            let _ = debug_ctx.event_tx.send(DebugEvent::Output(new_out));
+                            debug_sent = ctx.output.print_len();
+                        }
+                    }
+                }
             }
             Stmt::Loop { var, count, condition, cached_tokens, body } => {
                 let holder = sub_debug_for(debug);
@@ -1285,19 +1355,17 @@ fn exec_stmts_impl(
                 for (k, &v) in global_labels {
                     ctx.sys.external_labels.entry(k.clone()).or_insert((v, 0));
                 }
-                // 若当前有 pending 且非内置函数，则非 \r 调用也视为延迟输出
-                let is_builtin = ctx.shared.builtins.contains_key(name.as_str());
-                let effective_no_newline = *no_newline || (!is_builtin && ctx.output.has_pending());
-                let snapshot = if effective_no_newline { Some(ctx.output.parts_len()) } else { None };
+                let effective_no_newline = *no_newline;
+                let snapshot = if effective_no_newline { Some(ctx.output.print_len()) } else { None };
                 // 始终保留 debug 上下文，确保调用栈追踪和逐语句调试正常工作
                 // \r 链时设置 defer_output，子函数 Output 不实时发送，由父函数统一延迟处理
                 let _debug_deferred;
                 let debug_for_call: Option<&DebugContext> = if let Some(dbg) = debug {
                     if effective_no_newline {
                         _debug_deferred = DebugContext {
-                            shared: dbg.shared,
-                            event_tx: dbg.event_tx,
-                            cmd_rx: dbg.cmd_rx,
+                            shared: Arc::clone(&dbg.shared),
+                            event_tx: dbg.event_tx.clone(),
+                            cmd_rx: Arc::clone(&dbg.cmd_rx),
                             depth: dbg.depth,
                             defer_output: true,
                         };
@@ -1308,35 +1376,35 @@ fn exec_stmts_impl(
                 } else {
                     None
                 };
-                let parts_before_fc = ctx.output.parts_len();
+                let parts_before_fc = ctx.output.print_len();
                 let result = exec_func_call(ctx, name, args, debug_for_call);
                 // Debug: 根据 \r 语义决定立即发送还是延迟
                 if let Some(debug_ctx) = debug {
                     if effective_no_newline {
                         // \r 调用或链式延迟：移到 pending，函数末尾统一发送
-                        if ctx.sys.last_call_was_ctor && ctx.output.parts_len() > parts_before_fc {
+                        if ctx.sys.last_call_was_ctor && ctx.output.print_len() > parts_before_fc {
                             // 构造函数：内部输出由 sub_ctx 实时发送，handle 延迟
-                            let handle_idx = ctx.output.parts_len() - 1;
+                            let handle_idx = ctx.output.print_len() - 1;
                             if handle_idx > parts_before_fc {
                                 // 仅当 handle 之前还有额外输出时发送（debug=None 走正常路径的场景）
-                                let immediate = ctx.output.snapshot_range(parts_before_fc, handle_idx);
+                                let immediate = ctx.output.snapshot_print_range(parts_before_fc, handle_idx);
                                 if !immediate.is_empty() {
                                     let _ = debug_ctx.event_tx.send(DebugEvent::Output(immediate));
                                 }
                                 debug_sent = handle_idx;
                             }
                             ctx.output.move_last_to_pending();
-                        } else if ctx.output.parts_len() > parts_before_fc {
+                        } else if ctx.output.print_len() > parts_before_fc {
                             ctx.output.move_tail_to_pending(parts_before_fc);
                         }
                         // debug_sent 不更新（或已在上面更新），末尾 drain 会发送 pending
-                    } else if ctx.output.parts_len() > parts_before_fc {
+                    } else if ctx.output.print_len() > parts_before_fc {
                         // 非延迟：立即发送新增输出
-                        let new_out = ctx.output.snapshot_from(parts_before_fc);
+                        let new_out = ctx.output.snapshot_print_from(parts_before_fc);
                         if !new_out.is_empty() {
                             let _ = debug_ctx.event_tx.send(DebugEvent::Output(new_out));
                         }
-                        debug_sent = ctx.output.parts_len();
+                        debug_sent = ctx.output.print_len();
                     }
                 } else if effective_no_newline {
                     if ctx.sys.last_call_was_ctor {
@@ -1406,12 +1474,8 @@ fn exec_stmts_impl(
             }
             Stmt::TextBlock { var, content } => {
                 if var.is_empty() {
-                    ctx.output.add(content);
-                    // Debug: 文本块输出立即发送
-                    if let Some(debug_ctx) = debug {
-                        let _ = debug_ctx.event_tx.send(DebugEvent::Output(content.clone()));
-                        debug_sent = ctx.output.parts_len();
-                    }
+                    let old = ctx.val.p.get_cloned("_输出");
+                    ctx.val.p.set_string("_输出", old + content);
                 } else {
                     ctx.val.p.set_string(var, content.clone());
                 }
@@ -1423,14 +1487,14 @@ fn exec_stmts_impl(
                 if let Some(debug_ctx) = debug {
                     let _ = debug_ctx.event_tx.send(DebugEvent::Output(final_text));
                 } else {
-                    ctx.output.add(&final_text);
+                    ctx.output.add_print(&final_text);
                 }
             }
         }
 
         // 检查函数执行错误
         if let Some(msg) = ctx.sys.error.take() {
-            ctx.output.add(&msg);
+            ctx.output.add_print(&msg);
             if let Some(debug_ctx) = debug {
                 let _ = debug_ctx.event_tx.send(DebugEvent::Output(msg.clone()));
             }
@@ -1448,7 +1512,7 @@ fn exec_stmts_impl(
     // Debug: 仅发送尚未发送的延迟输出（defer_output 时跳过，由父调用者处理）
     if let Some(debug_ctx) = debug {
         if !debug_ctx.defer_output {
-            let deferred = ctx.output.drain_from(debug_sent);
+            let deferred = ctx.output.drain_print_from(debug_sent);
             if !deferred.is_empty() {
                 let _ = debug_ctx.event_tx.send(DebugEvent::Output(deferred));
             }
@@ -1483,7 +1547,7 @@ fn normalize_json_numbers(ctx: &mut DicContext, s: &str) -> String {
 
 /// 输出 JSON 解析错误，并拦截后续执行
 fn json_err(ctx: &mut DicContext, site: &str, detail: &str) {
-    ctx.output.add(&format!("\x1b[91m[JSON错误@{site}] 无法解析为合法 JSON: {detail}\x1b[0m\n"));
+    ctx.output.add_print(&format!("\x1b[91m[JSON错误@{site}] 无法解析为合法 JSON: {detail}\x1b[0m\n"));
     ctx.sys.stop = true;
     ctx.sys.error = Some("JSON解析失败".to_string());
 }
@@ -1605,23 +1669,20 @@ fn exec_output(ctx: &mut DicContext, text: &str) -> String {
     // 剥离 :: 原始值的 \x01 标记
     let final_text = final_text.replace('\x01', "");
     // 剥离行尾 \r（换行标记），再处理内部转义
-    let has_r_suffix = final_text.ends_with("\\r");
     let final_text = final_text.strip_suffix("\\r").unwrap_or(&final_text);
     let display = crate::analyzer::unescape_newline(final_text);
-    if has_r_suffix {
-        // \r 结尾 = 换行 + 延迟到函数末尾输出
-        ctx.output.add_pending(&format!("{}\n", display));
-    } else {
-        ctx.output.add(&format!("{}\n", display));
-    }
+    let old = ctx.val.p.get_cloned("_输出");
+    ctx.val.p.set_string("_输出", format!("{}{}\n", old, &display));
     display
 }
 
 fn exec_assign(ctx: &mut DicContext, target: &str, op: &AssignOp, expr: &Expr) {
     if target.is_empty() {
-        // 无目标变量 → 当作输出
+        // 无目标变量 → 累积到 _输出
         let val = eval_expr(ctx, expr).unwrap_or(Value::Null);
-        ctx.output.add(&val.display());
+        let display = val.display();
+        let old = ctx.val.p.get_cloned("_输出");
+        ctx.val.p.set_string("_输出", old + &display);
         return;
     }
 
@@ -2191,7 +2252,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                     let parsed_stmts = match parse_stmts(&code, false, func_line, &ctx.sys.source_file) {
                         Ok(s) => s,
                         Err(e) => {
-                            ctx.output.add(&e);
+                            ctx.output.add_print(&e);
                             return ExecResult::Continue;
                         }
                     };
@@ -2212,9 +2273,9 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                         });
                     }
                     let sub_debug = DebugContext {
-                        shared: debug_ctx.shared,
-                        event_tx: debug_ctx.event_tx,
-                        cmd_rx: debug_ctx.cmd_rx,
+                        shared: Arc::clone(&debug_ctx.shared),
+                        event_tx: debug_ctx.event_tx.clone(),
+                        cmd_rx: Arc::clone(&debug_ctx.cmd_rx),
                         depth: debug_ctx.depth + 1,
                         defer_output: debug_ctx.defer_output,
                     };
@@ -2223,7 +2284,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                         let mut ds = debug_ctx.shared.lock().unwrap();
                         ds.call_stack.pop();
                     }
-                    let out = sub_ctx.output.get();
+                    let out = sub_ctx.val.p.get_cloned("_输出");
                     if !out.is_empty() {
                         ctx.val.p.set_string(var_name, out.clone());
                         ctx.val.set_global(var_name, out);
@@ -2231,7 +2292,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                     return exec_result;
                 }
                 entry(&mut sub_ctx, &code);
-                let result = sub_ctx.output.get();
+                let result = sub_ctx.val.p.get_cloned("_输出");
                 if !result.is_empty() {
                     let old = ctx.val.p.get_cloned(var_name);
                     crate::functions::track_ptr_assign(&old, &result);
@@ -2283,7 +2344,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
     // 先查内置函数
     if let Some(&builtin_fn) = ctx.shared.builtins.get(name) {
         if let Some(output) = builtin_fn(ctx, &all_args, &content) {
-            ctx.output.add_string(output);
+            ctx.output.add_print_string(output);
         }
         return ExecResult::Continue;
     }
@@ -2295,6 +2356,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
         let method = &name[dot_pos + 1..];
         if !raw_obj.is_empty() && !method.is_empty() {
             let resolved_obj = ctx.val.text(&format!("%{}%", raw_obj));
+
             // 变量未定义时，可能是直接类名（如 $.回调 → Counter.回调）
             let resolved_obj = if resolved_obj.contains('%') {
                 raw_obj.to_string()
@@ -2312,41 +2374,46 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                 // 但如果变量被 0x 池句柄覆盖，则包别名失效（例如 a:0xa 后 $a.测试$ 不再指向包）
                 let resolved_raw = ctx.val.text(&format!("%{}%", raw_obj));
                 let pkg_alias_active = !resolved_raw.starts_with("0x") && !resolved_raw.starts_with("-0x");
+
                 let mut found_result: Option<(Vec<String>, Vec<String>, Vec<Option<String>>, bool, usize, String, String)> = None;
                 let mut found_is_ctor = false;
                 if pkg_alias_active {
                     if let Some(raw_pkg) = ctx.shared.packages.get(raw_obj) {
                     let pfx = format!("{} ", method);
                     let cmt = format!("{}.{}", method, method);
-                    // 构造函数检测
-                    if let Some((text, line, ctor_name)) = crate::functions::search_pkg_ctor(raw_pkg, method) {
-                        found_is_ctor = true;
-                        ctx.sys.last_call_was_ctor = true;
-                        found_result = Some((text, Vec::new(), Vec::new(), false, line, ctor_name, raw_obj.to_string()));
-                    }
-                    // 普通方法
-                    if found_result.is_none() {
-                        for item in &raw_pkg.local_func {
-                            if item.trigger == cmt || item.trigger == method || item.trigger.starts_with(&pfx) {
-                                found_result = Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1, cmt.clone(), raw_obj.to_string()));
-                                break;
-                            }
+                    // 普通方法优先（精确匹配优先于构造函数推导）
+                    let mut found_method = false;
+                    for item in &raw_pkg.local_func {
+                        if item.trigger == cmt || item.trigger == method || item.trigger.starts_with(&pfx) {
+                            found_result = Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1, cmt.clone(), raw_obj.to_string()));
+                            found_method = true;
+                            break;
                         }
                     }
-                    if found_result.is_none() {
+                    if !found_method {
                         for item in &raw_pkg.local_static {
                             if item.trigger == cmt || item.trigger == method || item.trigger.starts_with(&pfx) {
                                 found_result = Some((item.text.clone(), Vec::new(), Vec::new(), false, item.line + 1, cmt.clone(), raw_obj.to_string()));
+                                found_method = true;
                                 break;
                             }
                         }
                     }
                     // 模糊搜索
-                    if found_result.is_none() {
+                    if !found_method {
                         let cmt_clone = cmt.clone();
                         found_result = fuzzy_search_pkg_method(raw_pkg, method).map(
                             move |(text, pnames, pdefaults, pvari, line)| (text, pnames, pdefaults, pvari, line, cmt_clone, raw_obj.to_string())
                         );
+                        found_method = found_result.is_some();
+                    }
+                    // 未找到普通方法 → 尝试构造函数
+                    if !found_method {
+                        if let Some((text, line, ctor_name)) = crate::functions::search_pkg_ctor(raw_pkg, method) {
+                            found_is_ctor = true;
+                            ctx.sys.last_call_was_ctor = true;
+                            found_result = Some((text, Vec::new(), Vec::new(), false, line, ctor_name, raw_obj.to_string()));
+                        }
                     }
                 }
                 }
@@ -2367,16 +2434,16 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                             };
                             if let Some(pkg_bv) = ctx.shared.packages.get(pkg_name) {
                                 if class_name.is_empty() {
-                                    // 包指针：直接搜索方法名 / 构造函数
-                                    if let Some((text, line, ctor_name)) = crate::functions::search_pkg_ctor(pkg_bv, method) {
-                                        found_is_ctor = true;
-                                        ctx.sys.last_call_was_ctor = true;
-                                        found_result = Some((text, Vec::new(), Vec::new(), false, line, ctor_name, obj.to_string()));
+                                    // 包指针：普通方法优先（精确匹配优先于构造函数推导）
+                                    if let Some((text, pnames, pdefaults, pvari, line)) = crate::functions::search_pkg_method_direct(pkg_bv, method) {
+                                        let cmt = format!("{}.{}", method, method);
+                                        found_result = Some((text, pnames, pdefaults, pvari, line, cmt, obj.to_string()));
                                     }
                                     if found_result.is_none() {
-                                        if let Some((text, pnames, pdefaults, pvari, line)) = crate::functions::search_pkg_method_direct(pkg_bv, method) {
-                                            let cmt = format!("{}.{}", method, method);
-                                            found_result = Some((text, pnames, pdefaults, pvari, line, cmt, obj.to_string()));
+                                        if let Some((text, line, ctor_name)) = crate::functions::search_pkg_ctor(pkg_bv, method) {
+                                            found_is_ctor = true;
+                                            ctx.sys.last_call_was_ctor = true;
+                                            found_result = Some((text, Vec::new(), Vec::new(), false, line, ctor_name, obj.to_string()));
                                         }
                                     }
                                 } else {
@@ -2389,6 +2456,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                                 }
                             }
                         }
+
                         continue;
                     }
 
@@ -2636,7 +2704,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                         let parsed_stmts = match parse_stmts(&code, false, func_line, &sub_ctx.sys.source_file) {
                             Ok(s) => s,
                             Err(e) => {
-                                ctx.output.add(&e);
+                                ctx.output.add_print(&e);
                                 return ExecResult::Continue;
                             }
                         };
@@ -2657,9 +2725,9 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                             });
                         }
                         let sub_debug = DebugContext {
-                            shared: debug_ctx.shared,
-                            event_tx: debug_ctx.event_tx,
-                            cmd_rx: debug_ctx.cmd_rx,
+                            shared: Arc::clone(&debug_ctx.shared),
+                            event_tx: debug_ctx.event_tx.clone(),
+                            cmd_rx: Arc::clone(&debug_ctx.cmd_rx),
                             depth: debug_ctx.depth + 1,
                             defer_output: debug_ctx.defer_output,
                         };
@@ -2673,9 +2741,23 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                             return exec_result;
                         }
                         crate::functions::writeback_ptr_vars(ctx, &sub_ctx, &raw_args, &param_names, 0);
-                        // defer_output 时子上下文输出尚未发送，追加到父上下文
+                        // 子函数 _输出 传回调用者
+                        let sub_output = sub_ctx.val.p.get_cloned("_输出");
+                        if !sub_output.is_empty() {
+                            let old = ctx.val.p.get_cloned("_输出");
+                            ctx.val.p.set_string("_输出", old + &sub_output);
+                        }
+                        // defer_output 时子上下文输出尚未发送
                         if debug_ctx.defer_output {
-                            ctx.output.append_parts_from(&sub_ctx.output);
+                            if found_is_ctor {
+                                // 构造函数：体内输出通过 DebugEvent 立即发送，不混入返回值
+                                let ctor_output = sub_ctx.output.get_print();
+                                if !ctor_output.is_empty() {
+                                    let _ = debug_ctx.event_tx.send(DebugEvent::Output(ctor_output));
+                                }
+                            } else {
+                                ctx.output.append_print_from(&sub_ctx.output);
+                            }
                         }
                         if found_is_ctor {
                             let class_spec = if use_obj.contains('.') {
@@ -2691,8 +2773,8 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                             };
                             let handle = crate::functions::pool_alloc_instance(&class_spec);
                             ctx.save_ctor_instance_vars(&sub_ctx, &handle);
-                            // handle 写入 ctx.output，由 Stmt::FuncCall 根据 \r 语义决定立即发送还是延迟
-                            ctx.output.add(&handle);
+                            // handle 写入返回管道（add_return 同时写入打印管道以保持顺序）
+                            ctx.output.add_return(&handle);
                         } else {
                             ctx.save_instance_vars(&sub_ctx, raw_obj, &resolved_obj);
                         }
@@ -2704,7 +2786,24 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                         return ExecResult::Continue;
                     }
                     crate::functions::writeback_ptr_vars(ctx, &sub_ctx, &raw_args, &param_names, 0);
+                    // 子函数 _输出 传回调用者
+                    let sub_output = sub_ctx.val.p.get_cloned("_输出");
+                    if !sub_output.is_empty() {
+                        let old = ctx.val.p.get_cloned("_输出");
+                        ctx.val.p.set_string("_输出", old + &sub_output);
+                    }
                     if found_is_ctor {
+                        // 调试模式：构造函数体内输出通过 DebugEvent::Output 发送
+                        // 非调试模式：体内输出追加到父上下文的打印管道
+                        if let Some(ref dbg) = ctx.debug {
+                            let ctor_body = sub_ctx.output.get_print();
+                            if !ctor_body.is_empty() {
+                                let _ = dbg.event_tx.send(DebugEvent::Output(ctor_body));
+                            }
+                            sub_ctx.output.clear();
+                        } else {
+                            ctx.output.append_print_from(&sub_ctx.output);
+                        }
                         // OOP 构造函数：分配实例池
                         let class_spec = if use_obj.contains('.') {
                             use_obj.clone()
@@ -2723,21 +2822,20 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                         };
                         let handle = crate::functions::pool_alloc_instance(&class_spec);
                         ctx.save_ctor_instance_vars(&sub_ctx, &handle);
-                        // 构造函数：输出子上下文中的打印内容 + 实例指针
-                        ctx.output.append_parts_from(&sub_ctx.output);
-                        ctx.output.add(&handle);
+                        // handle 写入返回管道（add_return 同时写入打印管道以保持顺序）
+                        ctx.output.add_return(&handle);
                     } else {
                         ctx.save_instance_vars(&sub_ctx, raw_obj, &resolved_obj);
-                        ctx.output.append_parts_from(&sub_ctx.output);
+                        ctx.output.append_print_from(&sub_ctx.output);
                     }
                     return ExecResult::Continue;
                 }
                 // 方法未找到 → 原样输出
                 let args_str = args.join(" ");
                 if args_str.is_empty() {
-                    ctx.output.add_string(format!("${}$", name));
+                    ctx.output.add_print_string(format!("${}$", name));
                 } else {
-                    ctx.output.add_string(format!("${} {}$", name, args_str));
+                    ctx.output.add_print_string(format!("${} {}$", name, args_str));
                 }
                 return ExecResult::Continue;
             }
@@ -2916,7 +3014,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                 let parsed_stmts = match parse_stmts(&code, false, func_line, &ctx.sys.source_file) {
                     Ok(s) => s,
                     Err(e) => {
-                        ctx.output.add(&e);
+                        ctx.output.add_print(&e);
                         return ExecResult::Continue;
                     }
                 };
@@ -2937,12 +3035,13 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                     });
                 }
                 let sub_debug = DebugContext {
-                    shared: debug_ctx.shared,
-                    event_tx: debug_ctx.event_tx,
-                    cmd_rx: debug_ctx.cmd_rx,
+                    shared: Arc::clone(&debug_ctx.shared),
+                    event_tx: debug_ctx.event_tx.clone(),
+                    cmd_rx: Arc::clone(&debug_ctx.cmd_rx),
                     depth: debug_ctx.depth + 1,
                     defer_output: debug_ctx.defer_output,
                 };
+                sub_ctx.val.p.set_string("_输出", String::new());
                 let exec_result = exec_stmts_impl(&mut sub_ctx, &parsed_stmts, &func_labels, Some(&sub_debug));
                 {
                     let mut ds = debug_ctx.shared.lock().unwrap();
@@ -2955,6 +3054,12 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                 }
                 // 指针变量回写
                 crate::functions::writeback_ptr_vars(ctx, &sub_ctx, &raw_args, &param_names, 0);
+                // 子函数 _输出 传回调用者
+                let sub_output = sub_ctx.val.p.get_cloned("_输出");
+                if !sub_output.is_empty() {
+                    let old = ctx.val.p.get_cloned("_输出");
+                    ctx.val.p.set_string("_输出", old + &sub_output);
+                }
                 // 实例变量持久化
                 for (key, val) in sub_ctx.val.p.iter_local() {
                     if key.starts_with('.') {
@@ -2963,10 +3068,12 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                 }
                 // defer_output 时子上下文输出尚未发送，追加到父上下文由调用者统一处理
                 if debug_ctx.defer_output {
-                    ctx.output.append_parts_from(&sub_ctx.output);
+                    ctx.output.append_print_from(&sub_ctx.output);
                 }
                 return exec_result;
             }
+            // 子函数应拥有独立的 _输出 空间
+            sub_ctx.val.p.set_string("_输出", String::new());
             entry_via_ast(&mut sub_ctx, &code);
             // 回传跨函数 goto
             if sub_ctx.sys.pending_goto.is_some() {
@@ -2975,6 +3082,12 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
             }
             // 指针变量回写：若参数来自 %varName% 且 *varName 存在
             crate::functions::writeback_ptr_vars(ctx, &sub_ctx, &raw_args, &param_names, 0);
+            // 子函数 _输出 传回调用者
+            let sub_output = sub_ctx.val.p.get_cloned("_输出");
+            if !sub_output.is_empty() {
+                let old = ctx.val.p.get_cloned("_输出");
+                ctx.val.p.set_string("_输出", old + &sub_output);
+            }
             // 实例变量持久化：同步子上下文 .field 到当前上下文
             // 上层 OOP 调用会负责 ClassName.field 最终持久化
             for (key, val) in sub_ctx.val.p.iter_local() {
@@ -2982,7 +3095,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                     ctx.val.p.set_string(key, val.display());
                 }
             }
-            ctx.output.append_parts_from(&sub_ctx.output);
+            ctx.output.append_print_from(&sub_ctx.output);
         } else {
             let label = if is_variadic { "至少需要" } else { "需要" };
             ctx.sys.error = Some(format!(
@@ -2998,7 +3111,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
         let method = &name[dot_pos + 1..];
         if let Some(&builtin_fn) = ctx.shared.builtins.get(method) {
             if let Some(output) = builtin_fn(ctx, &all_args, &content) {
-                ctx.output.add_string(output);
+                ctx.output.add_print_string(output);
             }
             return ExecResult::Continue;
         }
@@ -3006,20 +3119,30 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
 
     // 未找到：保持原样输出
     let fallback = format!("${}$", content);
-    ctx.output.add(&fallback);
+    ctx.output.add_print(&fallback);
     ExecResult::Continue
 }
 
 /// 通过 AST 执行内部函数代码（递归调用 parse → exec）
 fn entry_via_ast(ctx: &mut DicContext, code: &[String]) {
+    // 若处于 DAP 调试模式，从 ctx 构建 DebugContext
+    let debug_ctx: Option<DebugContext> = ctx.debug.as_ref().map(|dbg| DebugContext {
+        shared: Arc::clone(&dbg.shared),
+        event_tx: Sender::clone(&dbg.event_tx),
+        cmd_rx: Arc::clone(&dbg.cmd_rx),
+        depth: 0,
+        defer_output: false,
+    });
+    let debug_ref = debug_ctx.as_ref();
+
     match parse_stmts(code, false, ctx.sys.line_offset, &ctx.sys.source_file) {
         Ok(stmts) => {
-            exec_stmts(ctx, &stmts, None);
+            exec_stmts(ctx, &stmts, debug_ref);
         }
         Err(e) => {
             // JSON 解析错误 → 拦截执行
             if e.contains("[JSON错误]") {
-                ctx.output.add(&format!("\x1b[91m{}\x1b[0m\n", e));
+                ctx.output.add_print(&format!("\x1b[91m{}\x1b[0m\n", e));
                 ctx.sys.stop = true;
                 ctx.sys.error = Some(e);
             } else {
@@ -3145,14 +3268,81 @@ pub fn eval_expr(ctx: &mut DicContext, expr: &Expr) -> Result<Value, String> {
             if let Some(&builtin_fn) = ctx.shared.builtins.get(name.as_str()) {
                 let result = builtin_fn(ctx, &all_args, &content).unwrap_or_default();
                 Ok(Value::Str(result))
+            } else if name.contains('.') && arg_strs.is_empty() {
+                // 跨包类引用（无参数）：实例化类（调用构造函数），返回实例指针
+                // 直接查找并执行构造函数，不走 exec_func_call 的通用 OOP 调度
+                // （exec_func_call 会把 "pkg.Cls" 的 method="Cls" 先匹配到同名的
+                //  [f:Cls]Cls 普通方法而非构造函数，导致 new 不被执行）
+                let dot_pos = name.find('.').unwrap();
+                let pkg_name = &name[..dot_pos];
+                let class_name = &name[dot_pos + 1..];
+
+                let pkg_bv = match ctx.shared.packages.get(pkg_name) {
+                    Some(bv) => bv.clone(),
+                    None => return Ok(Value::Str(String::new())),
+                };
+                let (ctor_code, ctor_line, ctor_name) = match crate::functions::search_pkg_ctor(&pkg_bv, class_name) {
+                    Some(t) => t,
+                    None => return Ok(Value::Str(String::new())),
+                };
+
+                let saved = ctx.output.get_print();
+                let pending_saved = ctx.output.drain_pending();
+                ctx.output.clear();
+
+                let mut sub_ctx = ctx.fresh_sub_context();
+                sub_ctx.sys.line_offset = ctor_line;
+                if !pkg_bv.source_file.is_empty() {
+                    sub_ctx.sys.source_file = pkg_bv.source_file.clone();
+                }
+                crate::functions::inject_pkg_context(&mut sub_ctx, &pkg_bv);
+                crate::functions::process_pkg_head_vars(&ctx.val, &mut sub_ctx, &pkg_bv, Some(name));
+                sub_ctx.val.p.set_string("self", name.to_string());
+                sub_ctx.val.p.set_string("触发", ctor_name.clone());
+                sub_ctx.val.p.set_string("参数0", ctor_name.clone());
+
+                ctx.sys.last_call_was_ctor = true;
+                entry_via_ast(&mut sub_ctx, &ctor_code);
+
+                let ctor_body = sub_ctx.output.get_print();
+                // 调试模式：构造函数体内输出通过 DebugEvent::Output 发送
+                if let Some(ref dbg) = ctx.debug {
+                    if !ctor_body.is_empty() {
+                        let _ = dbg.event_tx.send(DebugEvent::Output(ctor_body.clone()));
+                    }
+                    sub_ctx.output.clear();
+                }
+
+                let class_spec = format!("{}.{}", pkg_name, class_name);
+                let handle = crate::functions::pool_alloc_instance(&class_spec);
+                ctx.save_ctor_instance_vars(&sub_ctx, &handle);
+
+                // 恢复原有输出，非调试模式追加构造函数体内输出
+                ctx.output.clear();
+                ctx.output.add_print_string(saved);
+                if !pending_saved.is_empty() {
+                    ctx.output.add_pending(&pending_saved);
+                }
+                if ctx.debug.is_none() && !ctor_body.is_empty() {
+                    ctx.output.add_print(&ctor_body);
+                }
+
+                // handle 作为返回值
+
+                Ok(Value::Str(handle))
             } else {
                 // 执行函数调用，捕获其输出作为返回值（不输出到终端）
-                let saved = ctx.output.get();
+                let saved = ctx.output.get_print();
+                let pending_saved = ctx.output.drain_pending();
                 ctx.output.clear();
                 exec_func_call(ctx, name, &arg_strs, None);
-                let result = ctx.output.get();
+                let result = ctx.output.get_print();
                 ctx.output.clear();
-                ctx.output.add_string(saved);
+                ctx.output.add_print_string(saved);
+                // 恢复 delay 缓冲区（\r 输出），避免被 clear() 误清
+                if !pending_saved.is_empty() {
+                    ctx.output.add_pending(&pending_saved);
+                }
                 if let Some(err) = ctx.sys.error.take() {
                     return Err(err);
                 }
@@ -3263,7 +3453,7 @@ mod tests {
 
         exec_stmts(&mut ctx, &stmts, None);
 
-        let output = ctx.output.get();
+        let output = ctx.output.get_print();
 
         assert!(ctx.sys.error.is_none(), "unexpected error: {:?}", ctx.sys.error);
 
@@ -3338,7 +3528,7 @@ mod tests {
         // 执行
         exec_stmts(&mut ctx, &stmts, None);
 
-        let output = ctx.output.get();
+        let output = ctx.output.get_print();
 
         // 验证：不应有 JSON 解析错误
         assert!(ctx.sys.error.is_none(), "unexpected error: {:?}", ctx.sys.error);
@@ -3384,7 +3574,7 @@ mod tests {
 
         exec_stmts(&mut ctx, &stmts, None);
 
-        let output = ctx.output.get();
+        let output = ctx.output.get_print();
 
         assert!(ctx.sys.error.is_none(), "unexpected error: {:?}", ctx.sys.error);
 

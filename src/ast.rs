@@ -148,7 +148,7 @@ pub enum Stmt {
     /// 纯输出行（含 %var% 和 [expr] 的文本）
     Output(String),
     /// 赋值 var op expr
-    Assign { target: String, op: AssignOp, expr: Expr },
+    Assign { target: String, op: AssignOp, expr: Expr, no_newline: bool },
     /// for 循环 (count=循环次数, condition=条件表达式, cached_tokens=预编译Token)
     Loop { var: String, count: Option<Expr>, condition: Option<Expr>, cached_tokens: Option<Vec<Token>>, body: Vec<Stmt> },
     /// 如果 / 否则 (cached_tokens: 预编译条件 Token，避免每轮词法分析)
