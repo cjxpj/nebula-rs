@@ -308,8 +308,6 @@ pub fn unescape_newline(s: &str) -> String {
                 }
                 None => result.push('\\'),             // 末尾 \ → 原样
             }
-        } else if c == '\r' {
-            result.push('\n');                         // 实际回车符 → \n
         } else {
             result.push(c);
         }

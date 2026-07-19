@@ -339,12 +339,29 @@ impl DicContext {
         let mut loaded_pkgs: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut processed_heads: std::collections::HashSet<String> = std::collections::HashSet::new();
         let shared = Arc::make_mut(&mut self.shared);
-        for (head_idx, line) in bv.head.iter().enumerate() {
-            // #引入 / #引入= / #引入*= / pkg:#引入= 行在解析阶段已处理，不加入初始化队列
-            // contains 用 ":#引入" 同时覆盖 ":#引入=" 和 ":#引入*="（* 阻断 = 子串匹配）
-            if !line.starts_with("#引入") && !line.contains(":#引入") {
-                shared.init_lines.push(line.clone());
+
+        /// 加载包 head 变量到作用域，set_local 控制是否同时设置无前缀的本地变量
+        fn load_head_vars(val: &mut DicVal, shared: &mut SharedContext, pkg_bv: &BuildValue, pkg_key: &str, set_local: bool) {
+            for pkg_line in &pkg_bv.head {
+                let (pv_type, pv_prefix, pv_suffix) = val_text_test(pkg_line);
+                if pv_type == 6 && !pv_prefix.is_empty() {
+                    if val.p.get(&pv_prefix).is_some() {
+                        continue;
+                    }
+                    let pv_final = compute_head_value(val, &pv_suffix);
+                    if set_local {
+                        val.p.set_string(&pv_prefix, pv_final.clone());
+                    }
+                    let prefixed_key = format!("{}.{}", pkg_key, pv_prefix);
+                    val.p.set_string(&prefixed_key, pv_final);
+                } else if !pkg_line.trim().is_empty() {
+                    shared.init_lines.push(pkg_line.clone());
+                }
             }
+        }
+
+        for line in &bv.head {
+            shared.init_lines.push(line.clone());
 
             let (v_type, v_prefix, v_suffix) = val_text_test(line);
             if v_type == 6 && !v_prefix.is_empty() && v_suffix.contains("#引入=") && !loaded_pkgs.contains(&v_prefix) {
@@ -361,70 +378,29 @@ impl DicContext {
                 });
                 if let Some(pkg_bv) = bv.packages.get(pkg_lookup) {
                     if !processed_heads.insert(pkg_lookup.to_string()) { continue; }
-                    check_class_name_conflicts(&mut self.sys, pkg_bv, pkg_lookup, head_idx, "引入");
-                    if self.sys.stop { continue; }
-                    for pkg_line in &pkg_bv.head {
-                        let (pv_type, pv_prefix, pv_suffix) = val_text_test(pkg_line);
-                        if pv_type == 6 && !pv_prefix.is_empty() {
-                            if self.val.p.get(&pv_prefix).is_some() {
-                                continue;
-                            }
-                            let prefixed_key = format!("{}.{}", pkg_lookup, pv_prefix);
-                            let head_val = compute_head_value(&mut self.val, &pv_suffix);
-                            self.val.p.set_string(&prefixed_key, head_val);
-                        } else if !pkg_line.trim().is_empty() {
-                            shared.init_lines.push(pkg_line.clone());
-                        }
-                    }
+                    load_head_vars(&mut self.val, shared, pkg_bv, pkg_lookup, false);
                 }
             }
 
             // 星引入 #引入*=path：加载被引入包的 head 变量到当前作用域
             if line.starts_with("#引入*=") {
                 let raw_path = line.strip_prefix("#引入*=").unwrap_or("").trim();
-                let paths: Vec<&str> = raw_path.split(',')
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                for path in &paths {
+                for path in raw_path.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
                     let pkg_key = resolve_pkg_key(path);
                     if let Some(pkg_bv) = bv.packages.get(&pkg_key) {
                         if !processed_heads.insert(pkg_key.clone()) { continue; }
-                        check_class_name_conflicts(&mut self.sys, pkg_bv, &pkg_key, head_idx, "星引入");
-                        if self.sys.stop { continue; }
                         // 清理该包的旧星引入函数映射，再重新注册
                         shared.star_import_funcs.retain(|_, v| v != &pkg_key);
-                        // 注册星引入函数→源包名映射（用于隔离执行）
-                        for func in &pkg_bv.local_func {
-                            shared.star_import_funcs.insert(func.trigger.clone(), pkg_key.clone());
-                            // 同时注册基础名（去掉参数定义部分）
+                        let pk = pkg_key.clone();
+                        for func in pkg_bv.local_func.iter().chain(pkg_bv.local_static.iter()) {
+                            shared.star_import_funcs.insert(func.trigger.clone(), pk.clone());
                             let base_name = func.trigger.split(' ').next().unwrap_or(&func.trigger).to_string();
                             if base_name != func.trigger {
-                                shared.star_import_funcs.entry(base_name).or_insert_with(|| pkg_key.clone());
+                                shared.star_import_funcs.entry(base_name).or_insert_with(|| pk.clone());
                             }
                         }
-                        for static_func in &pkg_bv.local_static {
-                            shared.star_import_funcs.insert(static_func.trigger.clone(), pkg_key.clone());
-                            let base_name = static_func.trigger.split(' ').next().unwrap_or(&static_func.trigger).to_string();
-                            if base_name != static_func.trigger {
-                                shared.star_import_funcs.entry(base_name).or_insert_with(|| pkg_key.clone());
-                            }
-                        }
-                        // 加载包 head 变量（不覆盖已有变量，保持隔离性）
-                        for pkg_line in &pkg_bv.head {
-                            let (pv_type, pv_prefix, pv_suffix) = val_text_test(pkg_line);
-                            if pv_type == 6 && !pv_prefix.is_empty() {
-                                if self.val.p.get(&pv_prefix).is_some() {
-                                    continue;
-                                }
-                                let pv_final = compute_head_value(&mut self.val, &pv_suffix);
-                                self.val.p.set_string(&pv_prefix, pv_final.clone());
-                                let prefixed_key = format!("{}.{}", pkg_key, pv_prefix);
-                                self.val.p.set_string(&prefixed_key, pv_final);
-                            } else if !pkg_line.trim().is_empty() {
-                                shared.init_lines.push(pkg_line.clone());
-                            }
-                        }
+                        // 加载包 head 变量，同时设置本地变量（不覆盖已有）
+                        load_head_vars(&mut self.val, shared, pkg_bv, &pkg_key, true);
                     }
                 }
             }
@@ -444,19 +420,7 @@ impl DicContext {
                             !(t == 6 && p == pkg_key)
                         });
                     }
-                    for pkg_line in &pkg_bv.head {
-                        let (pv_type, pv_prefix, pv_suffix) = val_text_test(pkg_line);
-                        if pv_type == 6 && !pv_prefix.is_empty() {
-                            if self.val.p.get(&pv_prefix).is_some() {
-                                continue;
-                            }
-                            let prefixed_key = format!("{}.{}", pkg_key, pv_prefix);
-                            let head_val = compute_head_value(&mut self.val, &pv_suffix);
-                            self.val.p.set_string(&prefixed_key, head_val);
-                        } else if !pkg_line.trim().is_empty() {
-                            shared.init_lines.push(pkg_line.clone());
-                        }
-                    }
+                    load_head_vars(&mut self.val, shared, pkg_bv, &pkg_key, false);
                 }
             }
         }
@@ -472,13 +436,10 @@ impl DicContext {
         shared.triggers = bv.dic.clone();
 
         // 扫描并注册标准库包（#引入=@模块名）
+        for module in bv.packages.values()
+            .filter_map(|pkg_bv| crate::functions::is_stdlib_package(pkg_bv))
         {
-            let stdlib_modules: Vec<String> = bv.packages.values()
-                .filter_map(|pkg_bv| crate::functions::is_stdlib_package(pkg_bv).map(|m| m.to_string()))
-                .collect();
-            for module in &stdlib_modules {
-                crate::functions::StdLib::register_module(self, module);
-            }
+            crate::functions::StdLib::register_module(self, module);
         }
     }
 
@@ -1479,44 +1440,6 @@ fn compute_head_value(val: &mut DicVal, suffix: &str) -> String {
     }
 }
 
-/// 检查包内类名是否与函数名/内部词条名冲突
-fn check_class_name_conflicts(
-    sys: &mut SysV,
-    pkg_bv: &BuildValue,
-    pkg_key: &str,
-    head_idx: usize,
-    context_label: &str,
-) {
-    let mut class_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for item in pkg_bv.local_func.iter().chain(pkg_bv.local_static.iter()) {
-        for suffix in &[".初始化", ".new"] {
-            if let Some(dot_pos) = item.trigger.find(suffix) {
-                if dot_pos > 0 {
-                    let after = &item.trigger[dot_pos + suffix.len()..];
-                    if after.is_empty() || after.starts_with(' ') {
-                        class_names.insert(&item.trigger[..dot_pos]);
-                    }
-                }
-            }
-        }
-    }
-    for class_name in &class_names {
-        let pfx = format!("{} ", class_name);
-        let conflict = pkg_bv.local_func.iter().any(|item|
-            item.trigger == *class_name || item.trigger.starts_with(&pfx)
-        ) || pkg_bv.local_static.iter().any(|item|
-            item.trigger == *class_name || item.trigger.starts_with(&pfx)
-        );
-        if conflict {
-            let file_loc = format!("{} 第{}行: ", sys.source_file, head_idx + 1);
-            sys.error = Some(format!(
-                "[错误] {}{}包 '{}' 时：类名 '{}' 与包内函数名冲突", file_loc, context_label, pkg_key, class_name
-            ));
-            sys.stop = true;
-        }
-    }
-}
-
 impl crate::iftext::CondEval for DicContext {
     fn val(&self) -> &DicVal {
         &self.val
@@ -1702,32 +1625,20 @@ impl Nebula {
             let output_content = self.ctx.val.p.get_cloned("_输出");
             let output_trimmed = output_content.trim().to_string();
             if !output_trimmed.is_empty() {
-                self.ctx.output.add_print(&output_trimmed);
+                let display_output = crate::analyzer::unescape_newline(&output_trimmed);
+                self.ctx.output.add_print(&display_output);
                 self.ctx.output.add_print("\n");
                 // 调试模式：同时通过 DebugEvent 发送 _输出 到调试控制台
                 if let Some(ref dbg) = self.ctx.debug {
-                    let _ = dbg.event_tx.send(crate::debug::DebugEvent::Output(format!("{}\n", output_trimmed)));
+                    let _ = dbg.event_tx.send(crate::debug::DebugEvent::Output(format!("{}\n", display_output)));
                 }
             }
             self.ctx.output.flush_pending();
             let func_print = self.ctx.output.get_print();
             let func_return = self.ctx.output.get_return();
 
-            let print_out = if head_print.is_empty() {
-                func_print
-            } else if func_print.is_empty() {
-                head_print
-            } else {
-                format!("{}\n{}", head_print.trim_end(), func_print)
-            };
-
-            let return_val = if head_return.is_empty() {
-                func_return
-            } else if func_return.is_empty() {
-                head_return
-            } else {
-                format!("{}\n{}", head_return.trim_end(), func_return)
-            };
+            let print_out = format!("{}{}", head_print, func_print);
+            let return_val = format!("{}{}", head_return, func_return);
 
             Ok((print_out, return_val))
         } else {

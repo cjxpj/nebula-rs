@@ -1259,7 +1259,8 @@ fn exec_stmts_impl(
         if let Some(debug_ctx) = debug {
             let file = ctx.sys.source_file.clone();
             let line = ctx.sys.line_offset + (idx as usize) + 1;
-            let is_func_call = matches!(stmt, Stmt::FuncCall { .. });
+            let is_func_call = matches!(stmt, Stmt::FuncCall { .. })
+                || matches!(stmt, Stmt::Assign { expr, .. } if matches!(expr, Expr::Call { .. }));
             let scope_chain: Vec<(String, HashMap<String, String>)> = ctx.val.p.collect_chain_vars()
                 .into_iter()
                 .map(|(name, map)| {
@@ -1297,7 +1298,20 @@ fn exec_stmts_impl(
             }
             Stmt::Assign { target, op, expr, no_newline } => {
                 let parts_before = ctx.output.print_len();
-                exec_assign(ctx, target, op, expr);
+                // Debug: 更新调用者栈帧为当前赋值位置（与 Stmt::FuncCall 一致）
+                if let Some(debug_ctx) = debug {
+                    let line = ctx.sys.line_offset + (idx as usize) + 1;
+                    let file = ctx.sys.source_file.clone();
+                    {
+                        let mut ds = debug_ctx.shared.lock().unwrap();
+                        if let Some(top) = ds.call_stack.last_mut() {
+                            top.line = line;
+                            top.file = file;
+                        }
+                    }
+                }
+                // 传递 debug 上下文，使 Expr::Call 能推送构造函数堆栈帧
+                exec_assign(ctx, target, op, expr, debug);
                 // \r 语义：赋值表达式仅将值存入变量，不产生额外输出
                 // （\r 后缀表示此行不自动换行，对赋值无输出影响）
                 // Debug: 发送非 \r 的新增输出
@@ -1672,14 +1686,14 @@ fn exec_output(ctx: &mut DicContext, text: &str) -> String {
     let final_text = final_text.strip_suffix("\\r").unwrap_or(&final_text);
     let display = crate::analyzer::unescape_newline(final_text);
     let old = ctx.val.p.get_cloned("_输出");
-    ctx.val.p.set_string("_输出", format!("{}{}\n", old, &display));
+    ctx.val.p.set_string("_输出", format!("{}{}\n", old, final_text));
     display
 }
 
-fn exec_assign(ctx: &mut DicContext, target: &str, op: &AssignOp, expr: &Expr) {
+fn exec_assign(ctx: &mut DicContext, target: &str, op: &AssignOp, expr: &Expr, debug: Option<&DebugContext>) {
     if target.is_empty() {
         // 无目标变量 → 累积到 _输出
-        let val = eval_expr(ctx, expr).unwrap_or(Value::Null);
+        let val = eval_expr(ctx, expr, debug).unwrap_or(Value::Null);
         let display = val.display();
         let old = ctx.val.p.get_cloned("_输出");
         ctx.val.p.set_string("_输出", old + &display);
@@ -1713,7 +1727,7 @@ fn exec_assign(ctx: &mut DicContext, target: &str, op: &AssignOp, expr: &Expr) {
             let json_key = count::run_count_text(&ctx.val, json_key);
             let json_str = crate::value::Scope::lookup_display(&json_key, &ctx.val.p, Some(ctx.val.g.get_all()));
             if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                let eval_result = eval_expr(ctx, expr).unwrap_or(Value::Null);
+                let eval_result = eval_expr(ctx, expr, debug).unwrap_or(Value::Null);
                 let v_set_data = eval_result.display();
                 let sub_keys: Vec<String> = sub_keys
                     .iter()
@@ -1744,7 +1758,7 @@ fn exec_assign(ctx: &mut DicContext, target: &str, op: &AssignOp, expr: &Expr) {
     }
 
     // 标准赋值
-    let raw_val = eval_expr(ctx, expr).unwrap_or(Value::Null);
+    let raw_val = eval_expr(ctx, expr, debug).unwrap_or(Value::Null);
 
     match op {
         AssignOp::Set => {
@@ -2011,7 +2025,7 @@ fn exec_loop(
 
     let max_count = match count {
         Some(expr) => {
-            match eval_expr(ctx, expr) {
+            match eval_expr(ctx, expr, debug) {
                 Ok(val) => {
                     let n = val.as_i64();
                     if n < 0 { 0 } else { n as usize }
@@ -2125,7 +2139,7 @@ fn exec_foreach(
     global_labels: &std::collections::HashMap<String, isize>,
     debug: Option<&DebugContext>,
 ) -> ExecResult {
-    let array_val = eval_expr(ctx, array_expr).unwrap_or(Value::Null);
+    let array_val = eval_expr(ctx, array_expr, debug).unwrap_or(Value::Null);
     let array_str = ctx.val.text(&array_val.display());
     let final_str = count::run_count_text(&ctx.val, &array_str);
 
@@ -3170,18 +3184,18 @@ fn eval_cond_text(ctx: &mut DicContext, expr: &Expr) -> String {
             }
         }
         Expr::BinOp(left, op, right) => {
-            let l = match eval_expr(ctx, left) {
+            let l = match eval_expr(ctx, left, None) {
                 Ok(v) => v,
                 Err(e) => { ctx.sys.error = Some(e); Value::Int(0) }
             };
-            let r = match eval_expr(ctx, right) {
+            let r = match eval_expr(ctx, right, None) {
                 Ok(v) => v,
                 Err(e) => { ctx.sys.error = Some(e); Value::Int(0) }
             };
             count::compute_bin_op(&l, &r, *op).display()
         }
         Expr::Neg(inner) => {
-            let v = match eval_expr(ctx, inner) {
+            let v = match eval_expr(ctx, inner, None) {
                 Ok(v) => v,
                 Err(e) => { ctx.sys.error = Some(e); Value::Int(0) }
             };
@@ -3194,7 +3208,7 @@ fn eval_cond_text(ctx: &mut DicContext, expr: &Expr) -> String {
         Expr::Call { name, args } => {
             let arg_strs: Vec<String> = args
                 .iter()
-                .map(|a| match eval_expr(ctx, a) {
+                .map(|a| match eval_expr(ctx, a, None) {
                     Ok(v) => v.display(),
                     Err(e) => { ctx.sys.error = Some(e); String::new() }
                 })
@@ -3216,7 +3230,7 @@ fn eval_cond_text(ctx: &mut DicContext, expr: &Expr) -> String {
 }
 
 /// 求值表达式为 Value
-pub fn eval_expr(ctx: &mut DicContext, expr: &Expr) -> Result<Value, String> {
+pub fn eval_expr(ctx: &mut DicContext, expr: &Expr, debug: Option<&DebugContext>) -> Result<Value, String> {
     match expr {
         Expr::Lit(v) => Ok(v.clone()),
         Expr::Var(name) => {
@@ -3238,12 +3252,12 @@ pub fn eval_expr(ctx: &mut DicContext, expr: &Expr) -> Result<Value, String> {
             }
         }
         Expr::BinOp(left, op, right) => {
-            let l = eval_expr(ctx, left)?;
-            let r = eval_expr(ctx, right)?;
+            let l = eval_expr(ctx, left, debug)?;
+            let r = eval_expr(ctx, right, debug)?;
             Ok(count::compute_bin_op(&l, &r, *op))
         }
         Expr::Neg(inner) => {
-            let v = eval_expr(ctx, inner)?;
+            let v = eval_expr(ctx, inner, debug)?;
             match v {
                 Value::Int(i) => Ok(Value::Int(-i)),
                 Value::Float(f) => Ok(Value::Float(-f)),
@@ -3257,7 +3271,7 @@ pub fn eval_expr(ctx: &mut DicContext, expr: &Expr) -> Result<Value, String> {
             // 函数调用求值：先执行 exec_func_call，捕获输出作为返回值
             let arg_strs: Vec<String> = args
                 .iter()
-                .map(|a| eval_expr(ctx, a).map(|v| v.display()).unwrap_or_default())
+                .map(|a| eval_expr(ctx, a, debug).map(|v| v.display()).unwrap_or_default())
                 .collect();
             let all_args: Vec<String> = {
                 let mut a = vec![name.clone()];
@@ -3302,16 +3316,54 @@ pub fn eval_expr(ctx: &mut DicContext, expr: &Expr) -> Result<Value, String> {
                 sub_ctx.val.p.set_string("参数0", ctor_name.clone());
 
                 ctx.sys.last_call_was_ctor = true;
-                entry_via_ast(&mut sub_ctx, &ctor_code);
+                // 调试模式：推送堆栈帧并单步进入构造函数
+                if let Some(debug_ctx) = debug {
+                    let parsed_stmts = match parse_stmts(&ctor_code, false, ctor_line, &sub_ctx.sys.source_file) {
+                        Ok(s) => s,
+                        Err(_e) => {
+                            ctx.output.clear();
+                            ctx.output.add_print_string(saved);
+                            if !pending_saved.is_empty() {
+                                ctx.output.add_pending(&pending_saved);
+                            }
+                            return Ok(Value::Str(String::new()));
+                        }
+                    };
+                    let func_labels = collect_all_labels(&parsed_stmts);
+                    {
+                        let mut ds = debug_ctx.shared.lock().unwrap();
+                        let frame_id = ds.call_stack.len();
+                        let saved_scope = ds.scope_chain.clone();
+                        if let Some(caller) = ds.call_stack.last_mut() {
+                            caller.scope_chain = saved_scope;
+                        }
+                        ds.call_stack.push(StackFrame {
+                            id: frame_id,
+                            name: name.to_string(),
+                            file: sub_ctx.sys.source_file.clone(),
+                            line: ctor_line,
+                            scope_chain: Vec::new(),
+                        });
+                    }
+                    let sub_debug = DebugContext {
+                        shared: Arc::clone(&debug_ctx.shared),
+                        event_tx: debug_ctx.event_tx.clone(),
+                        cmd_rx: Arc::clone(&debug_ctx.cmd_rx),
+                        depth: debug_ctx.depth + 1,
+                        defer_output: debug_ctx.defer_output,
+                    };
+                    let _ = exec_stmts_impl(&mut sub_ctx, &parsed_stmts, &func_labels, Some(&sub_debug));
+                    {
+                        let mut ds = debug_ctx.shared.lock().unwrap();
+                        ds.call_stack.pop();
+                    }
+                } else {
+                    entry_via_ast(&mut sub_ctx, &ctor_code);
+                }
 
                 let ctor_body = sub_ctx.output.get_print();
-                // 调试模式：构造函数体内输出通过 DebugEvent::Output 发送
-                if let Some(ref dbg) = ctx.debug {
-                    if !ctor_body.is_empty() {
-                        let _ = dbg.event_tx.send(DebugEvent::Output(ctor_body.clone()));
-                    }
-                    sub_ctx.output.clear();
-                }
+                // 调试模式：构造函数输出已在 exec_stmts_impl 中通过 DebugEvent 增量发送
+                // 非调试模式：将构造函数体内输出追加到父上下文输出管道
 
                 let class_spec = format!("{}.{}", pkg_name, class_name);
                 let handle = crate::functions::pool_alloc_instance(&class_spec);
@@ -3323,7 +3375,7 @@ pub fn eval_expr(ctx: &mut DicContext, expr: &Expr) -> Result<Value, String> {
                 if !pending_saved.is_empty() {
                     ctx.output.add_pending(&pending_saved);
                 }
-                if ctx.debug.is_none() && !ctor_body.is_empty() {
+                if debug.is_none() && !ctor_body.is_empty() {
                     ctx.output.add_print(&ctor_body);
                 }
 
@@ -3335,7 +3387,7 @@ pub fn eval_expr(ctx: &mut DicContext, expr: &Expr) -> Result<Value, String> {
                 let saved = ctx.output.get_print();
                 let pending_saved = ctx.output.drain_pending();
                 ctx.output.clear();
-                exec_func_call(ctx, name, &arg_strs, None);
+                exec_func_call(ctx, name, &arg_strs, debug);
                 let result = ctx.output.get_print();
                 ctx.output.clear();
                 ctx.output.add_print_string(saved);
