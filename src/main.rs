@@ -13,6 +13,7 @@ mod updater;
 mod value;
 
 use std::io::{self, Write};
+use crate::interpreter::clear_out;
 
 #[cfg(windows)]
 fn enable_ansi() {
@@ -52,12 +53,12 @@ fn load_and_init(file_path: &str) -> Result<interpreter::Nebula, String> {
 
 fn run_batch(file_path: &str) -> Result<(), String> {
     let mut nb = load_and_init(file_path)?;
-    nb.exec_func("main")
-        .map(|(print_out, _return_val)| {
-            if !print_out.is_empty() {
-                print!("{}", print_out);
-            }
-        })
+    // 执行期间普通输出行仅累积到 _输出（返回管道），main 结束时统一打印
+    nb.exec_func("main").map(|out| {
+        if !out.is_empty() {
+            print!("{}", out);
+        }
+    })
 }
 
 fn run_repl(file_path: &str) -> Result<(), String> {
@@ -78,12 +79,11 @@ fn run_repl(file_path: &str) -> Result<(), String> {
             continue;
         }
         interpreter::entry(&mut nb.ctx, &[line.to_string()]);
-        let output = nb.ctx.output.get_print();
+        let output = nb.ctx.val.p.get_cloned("_输出");
         if !output.is_empty() {
             print!("{}", output);
         }
-        // 返回管道可单独获取：nb.ctx.output.get_return()
-        nb.ctx.output.clear();
+        clear_out(&mut nb.ctx);
     }
     Ok(())
 }

@@ -13,165 +13,17 @@ type FuncPrefixResult = (Vec<String>, Vec<String>, Vec<Option<String>>, bool, us
 /// `find_trigger` 返回值：(代码列表, 触发名, 捕获名列表, 捕获值列表)
 type TriggerResult = (Vec<String>, String, Vec<String>, Vec<String>);
 
-/// 输出累积器
-/// 双管道设计：
-/// - 打印管道（print_parts）：所有需要输出到终端的内容，保持有序
-/// - 返回管道（return_parts）：仅函数返回值（构造函数 handle 等）
-///   每次 add_return 会同时写入打印管道以维持顺序
-#[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
-pub struct Output {
-    print_parts: Vec<String>,
-    return_parts: Vec<String>,
-    /// \r 延迟输出缓冲区：\r 后缀的行暂存于此，函数结束时 flush 到 print_parts
-    pending: Vec<String>,
+/// 输出文本：仅累积到 _输出 变量（返回管道），不直接打印
+/// 终端直接输出由 $打印$ 负责；批处理模式在 main 结束时统一打印 _输出
+pub fn emit(ctx: &mut DicContext, text: &str) {
+    if text.is_empty() { return; }
+    let old = ctx.val.p.get_cloned("_输出");
+    ctx.val.p.set_string("_输出", format!("{}{}", old, text));
 }
 
-#[allow(dead_code)]
-impl Output {
-    pub fn new() -> Self {
-        Output { print_parts: Vec::new(), return_parts: Vec::new(), pending: Vec::new() }
-    }
-
-    /// 写入打印管道
-    pub fn add_print(&mut self, s: &str) {
-        if s.is_empty() { return; }
-        self.print_parts.push(s.to_string());
-    }
-
-    /// 写入打印管道（String 版本）
-    pub fn add_print_string(&mut self, s: String) {
-        if s.is_empty() { return; }
-        self.print_parts.push(s);
-    }
-
-    /// 写入返回管道（同时写入打印管道以保持顺序）
-    pub fn add_return(&mut self, s: &str) {
-        if s.is_empty() { return; }
-        self.print_parts.push(s.to_string());
-        self.return_parts.push(s.to_string());
-    }
-
-    /// 获取打印管道内容
-    pub fn get_print(&self) -> String {
-        self.print_parts.join("")
-    }
-
-    /// 获取返回管道内容
-    pub fn get_return(&self) -> String {
-        self.return_parts.join("")
-    }
-
-    /// 如果最后一个 print_part 以 \n 结尾，去掉该 \n
-    pub fn strip_trailing_newline(&mut self) {
-        if let Some(last) = self.print_parts.last_mut() {
-            if last.ends_with('\n') {
-                last.pop();
-            }
-        }
-    }
-
-    /// 清空所有管道
-    pub fn clear(&mut self) {
-        self.print_parts.clear();
-        self.return_parts.clear();
-        self.pending.clear();
-    }
-
-    // === \r 延迟输出 ===
-
-    /// 将文本加入 \r 延迟缓冲区
-    pub fn add_pending(&mut self, s: &str) {
-        if s.is_empty() { return; }
-        self.pending.push(s.to_string());
-    }
-
-    /// 延迟缓冲区是否非空
-    pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
-    }
-
-    /// 将延迟缓冲区的内容追加到打印管道末尾
-    pub fn flush_pending(&mut self) {
-        self.print_parts.append(&mut self.pending);
-    }
-
-    /// 返回 print_parts 的长度，用于捕获函数调用期间的输出增量
-    pub fn print_len(&self) -> usize {
-        self.print_parts.len()
-    }
-
-    /// 将 from_idx 及之后的 print_parts 移动到 pending 缓冲区
-    /// \r 语义：确保末尾有 \n（换行），再延迟输出
-    pub fn move_tail_to_pending(&mut self, from_idx: usize) {
-        let mut tail: Vec<String> = self.print_parts.drain(from_idx..).collect();
-        if let Some(last) = tail.last_mut() {
-            if !last.ends_with('\n') {
-                last.push('\n');
-            }
-        }
-        for s in tail {
-            if !s.is_empty() {
-                self.pending.push(s);
-            }
-        }
-    }
-
-    /// 仅将最后一个 print_part 移动到 pending（自动加 \n 保证换行）
-    /// 用于构造函数 \r：构造函数体 $打印$ 立即输出，仅返回值 0x 指针延迟
-    pub fn move_last_to_pending(&mut self) {
-        if let Some(last) = self.print_parts.pop() {
-            if !last.is_empty() {
-                let s = if last.ends_with('\n') { last } else { last + "\n" };
-                self.pending.push(s);
-            }
-        }
-    }
-
-    /// 将另一个 Output 的 print_parts 逐个追加到当前 Output
-    /// （避免 get_print() 拼接导致 $打印$ 的 \n 混入中间）
-    pub fn append_print_from(&mut self, other: &Output) {
-        for part in &other.print_parts {
-            if !part.is_empty() {
-                self.print_parts.push(part.clone());
-            }
-        }
-    }
-
-    /// 从 from_idx 开始快照 print_parts（不 drain），返回拼接后的字符串
-    pub fn snapshot_print_from(&self, from_idx: usize) -> String {
-        if from_idx >= self.print_parts.len() {
-            return String::new();
-        }
-        self.print_parts[from_idx..].join("")
-    }
-
-    /// 快照 print_parts[from..to]（不 drain），返回拼接后的字符串
-    pub fn snapshot_print_range(&self, from: usize, to: usize) -> String {
-        if from >= self.print_parts.len() || to <= from {
-            return String::new();
-        }
-        let to = to.min(self.print_parts.len());
-        self.print_parts[from..to].join("")
-    }
-
-    /// 从 from_idx 开始 drain print_parts 并返回拼接后的字符串
-    pub fn drain_print_from(&mut self, from_idx: usize) -> String {
-        if from_idx >= self.print_parts.len() {
-            return String::new();
-        }
-        let drained: Vec<String> = self.print_parts.drain(from_idx..).collect();
-        drained.join("")
-    }
-
-    /// 排空 pending 缓冲区并返回拼接后的字符串
-    pub fn drain_pending(&mut self) -> String {
-        if self.pending.is_empty() {
-            return String::new();
-        }
-        let drained: Vec<String> = self.pending.drain(..).collect();
-        drained.join("")
-    }
+/// 清空 _输出
+pub fn clear_out(ctx: &mut DicContext) {
+    ctx.val.p.set_string("_输出", String::new());
 }
 
 /// 系统状态
@@ -263,8 +115,6 @@ pub struct SharedContext {
     pub local_func: Vec<BuildDic>,
     pub local_func_map: HashMap<String, usize>,
     pub packages: HashMap<String, BuildValue>,
-    /// 星引入函数→源包名映射（用于隔离执行：调用时注入源包 head 变量）
-    pub star_import_funcs: HashMap<String, String>,
     pub triggers: Vec<BuildDic>,
     pub init_lines: Vec<String>,
 }
@@ -274,7 +124,6 @@ pub struct SharedContext {
 pub struct DicContext {
     pub val: DicVal,
     pub sys: SysV,
-    pub output: Output,
     /// 执行期间不可变数据（通过 Arc 共享，避免循环中深拷贝）
     pub shared: Arc<SharedContext>,
     /// 正在加载的目录路径，防止 #引入= 循环递归
@@ -297,11 +146,7 @@ pub(crate) fn resolve_pkg_key(path: &str) -> String {
         path[1..].to_string()
     } else {
         let p = std::path::Path::new(path);
-        if path.ends_with(".nr") {
-            p.file_stem().and_then(|s| s.to_str()).unwrap_or(path).to_string()
-        } else {
-            p.file_name().and_then(|s| s.to_str()).unwrap_or(path).to_string()
-        }
+        p.file_stem().and_then(|s| s.to_str()).unwrap_or(path).to_string()
     }
 }
 
@@ -316,14 +161,12 @@ impl DicContext {
             local_func: Vec::new(),
             local_func_map: HashMap::new(),
             packages: HashMap::new(),
-            star_import_funcs: HashMap::new(),
             triggers: Vec::new(),
             init_lines: Vec::new(),
         };
         let mut ctx = DicContext {
             val: DicVal::new(),
             sys: SysV::default(),
-            output: Output::new(),
             shared: Arc::new(shared),
             reloading_dirs: HashSet::new(),
             debug: None,
@@ -361,7 +204,10 @@ impl DicContext {
         }
 
         for line in &bv.head {
-            shared.init_lines.push(line.clone());
+            // #引入= / #引入*= 在 load 阶段已处理，不推入 init_lines 重复执行
+            if !line.starts_with("#引入") {
+                shared.init_lines.push(line.clone());
+            }
 
             let (v_type, v_prefix, v_suffix) = val_text_test(line);
             if v_type == 6 && !v_prefix.is_empty() && v_suffix.contains("#引入=") && !loaded_pkgs.contains(&v_prefix) {
@@ -389,16 +235,6 @@ impl DicContext {
                     let pkg_key = resolve_pkg_key(path);
                     if let Some(pkg_bv) = bv.packages.get(&pkg_key) {
                         if !processed_heads.insert(pkg_key.clone()) { continue; }
-                        // 清理该包的旧星引入函数映射，再重新注册
-                        shared.star_import_funcs.retain(|_, v| v != &pkg_key);
-                        let pk = pkg_key.clone();
-                        for func in pkg_bv.local_func.iter().chain(pkg_bv.local_static.iter()) {
-                            shared.star_import_funcs.insert(func.trigger.clone(), pk.clone());
-                            let base_name = func.trigger.split(' ').next().unwrap_or(&func.trigger).to_string();
-                            if base_name != func.trigger {
-                                shared.star_import_funcs.entry(base_name).or_insert_with(|| pk.clone());
-                            }
-                        }
                         // 加载包 head 变量，同时设置本地变量（不覆盖已有）
                         load_head_vars(&mut self.val, shared, pkg_bv, &pkg_key, true);
                     }
@@ -494,60 +330,6 @@ impl DicContext {
         self.val.set_global(key, value);
     }
 
-    /// 解析 %包名.变量% 引入包变量（仅头部变量，不执行代码）
-    pub fn resolve_package_vars(&mut self, input: &str) -> String {
-        // 快速路径：不含 %. → 肯定不是 %包名.变量% 模式
-        if !input.contains("%.") {
-            return input.to_string();
-        }
-
-        use std::sync::OnceLock;
-        static PKG_RE: OnceLock<regex::Regex> = OnceLock::new();
-        let re = PKG_RE.get_or_init(|| regex::Regex::new(r"%([^.]+)\.([^%]+)%").unwrap());
-
-        let mut result = input.to_string();
-        loop {
-            let caps = re.captures(&result);
-            if caps.is_none() { break; }
-            let caps = caps.unwrap();
-            let pkg = caps[1].to_string();
-            let key = caps[2].to_string();
-            let matched = caps[0].to_string();
-
-            let resolved = if let Some(bv) = self.shared.packages.get(&pkg) {
-                let override_key = format!("{}.{}", pkg, key);
-                let local_override = self.val.p.resolve(&override_key);
-                if let Some(val) = local_override {
-                    let s = val.display();
-                    if !s.is_empty() && !s.contains('%') {
-                        Some(s)
-                    } else {
-                        None
-                    }
-                } else {
-                    let mut found: Option<String> = None;
-                    for line in &bv.head {
-                        let (v_type, v_prefix, v_suffix) = val_text_test(line);
-                        if v_type == 6 && v_prefix == key {
-                            found = Some(self.val.text(&v_suffix));
-                            break;
-                        }
-                    }
-                    found
-                }
-            } else {
-                None
-            };
-
-            if let Some(val) = resolved {
-                result = result.replace(&matched, &val);
-            } else {
-                break;
-            }
-        }
-        result
-    }
-
     /// 运行时重新加载 #引入= 包（热更新）
     pub fn reload_package(&mut self, pkg_name: &str, path: &str) {
         // 先检测是否为文件夹
@@ -571,7 +353,7 @@ impl DicContext {
                 actual_path = try_nr;
             } else {
                 let file_info = self.sys.file_location();
-                self.output.add_print(&format!("[错误] {}引入文件不存在或不为 .nr 文件：{}（#引入={}）\n", file_info, actual_path, path));
+                emit(self, &format!("[错误] {}引入文件不存在或不为 .nr 文件：{}（#引入={}）\n", file_info, actual_path, path));
                 self.sys.stop = true;
                 return;
             }
@@ -585,7 +367,7 @@ impl DicContext {
             // 防递归：若该文件正在加载中，报错
             if !self.reloading_dirs.insert(canon_str.clone()) {
                 let file_info = self.sys.file_location();
-                self.output.add_print(&format!("[错误] {}循环引入：{}（#引入={}）\n", file_info, actual_path, path));
+                emit(self, &format!("[错误] {}循环引入：{}（#引入={}）\n", file_info, actual_path, path));
                 self.sys.stop = true;
                 return;
             }
@@ -624,7 +406,7 @@ impl DicContext {
         let dir = std::path::Path::new(dir_path);
         if !dir.is_dir() {
             let file_info = self.sys.file_location();
-            self.output.add_print(&format!("[错误] {}引入目标不存在：{}（#引入={}）\n", file_info, dir_path, dir_path));
+            emit(self, &format!("[错误] {}引入目标不存在：{}（#引入={}）\n", file_info, dir_path, dir_path));
             self.sys.stop = true;
             return;
         }
@@ -633,7 +415,7 @@ impl DicContext {
         let canon_str = canon.to_string_lossy().to_string();
         if !self.reloading_dirs.insert(canon_str.clone()) {
             let file_info = self.sys.file_location();
-            self.output.add_print(&format!("[错误] {}循环引入：{}（#引入={}）\n", file_info, dir_path, dir_path));
+            emit(self, &format!("[错误] {}循环引入：{}（#引入={}）\n", file_info, dir_path, dir_path));
             self.sys.stop = true;
             return;
         }
@@ -684,7 +466,7 @@ impl DicContext {
             }
             Err(e) => {
                 let file_info = self.sys.file_location();
-                self.output.add_print(&format!("{} {}\n", file_info, e));
+                emit(self, &format!("{} {}\n", file_info, e));
                 self.sys.stop = true;
             }
         }
@@ -762,9 +544,9 @@ impl DicContext {
         let handle = crate::functions::pool_alloc_instance(&class_spec);
         self.save_ctor_instance_vars(&sub_ctx, &handle);
 
-        let output = sub_ctx.output.get_print();
+        let output = sub_ctx.val.p.get_cloned("_输出");
         if !output.is_empty() {
-            self.output.add_print(&crate::analyzer::unescape_newline(&output));
+            emit(self, &crate::analyzer::unescape_newline(&output));
         }
 
         handle
@@ -808,76 +590,16 @@ impl DicContext {
         None
     }
 
-    /// 预处理 %func@arg% 语法：将 %函数名@参数变量% 替换为函数调用结果
-    fn expand_func_at(&mut self, text: &str) -> String {
-        if !text.contains('@') {
-            return text.to_string();
-        }
-        // 已知的特殊 @ 前缀，不在 expand_func_at 中处理
-        const KNOWN_AT_PREFIXES: &[&str] = &["TYPE@", "B64@", "len@", "长度@", "URL编码@", "func@"];
-
-        let mut result = String::with_capacity(text.len());
-        let mut rest = text;
-
-        loop {
-            match rest.find('%') {
-                None => { result.push_str(rest); break; }
-                Some(pct) => {
-                    result.push_str(&rest[..pct]);
-                    rest = &rest[pct + 1..];
-
-                    match rest.find('%') {
-                        None => { result.push('%'); result.push_str(rest); break; }
-                        Some(close) => {
-                            let inner = &rest[..close];
-                            rest = &rest[close + 1..];
-
-                            if inner.is_empty() || !inner.contains('@') {
-                                result.push('%');
-                                result.push_str(inner);
-                                result.push('%');
-                                continue;
-                            }
-                            // 跳过已知前缀和以 @ 开头的 JSON 路径
-                            if KNOWN_AT_PREFIXES.iter().any(|p| inner.starts_with(p))
-                                || inner.starts_with('@')
-                            {
-                                result.push('%');
-                                result.push_str(inner);
-                                result.push('%');
-                                continue;
-                            }
-                            // 分割 func@arg：取第一个 @ 之前为函数名，之后为参数变量名
-                            if let Some(at_pos) = inner.find('@') {
-                                let func_name = &inner[..at_pos];
-                                let arg_key = &inner[at_pos + 1..];
-                                // 解析参数变量的值
-                                let arg_val = self.val.text(&format!("%{}%", arg_key));
-                                // 调用函数（通过 $func arg$ 语法）
-                                let call_result = self.run_internal_text(
-                                    &format!("${} {}$", func_name, arg_val)
-                                );
-                                result.push_str(&call_result);
-                            } else {
-                                result.push('%');
-                                result.push_str(inner);
-                                result.push('%');
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        result
-    }
-
     /// 处理文本中的 $内部词条名 参数...$ 回调
     /// 返回替换后的文本
     pub fn run_internal_text(&mut self, text: &str) -> String {
         // 快速路径：不含 $ 直接做变量替换（含 %func@arg% 展开）
         if !text.contains('$') {
-            let expanded = self.expand_func_at(text);
+            let expanded = crate::value::expand_func_at(text,
+                |f, k| {
+                    let arg_val = self.val.text(&format!("%{}%", k));
+                    self.run_internal_text(&format!("${} {}$", f, arg_val))
+                });
             // 若含 \x01 标记（:: 原始值），跳过 val.text() 的二次 %var% 展开
             if expanded.contains('\x01') {
                 return expanded;
@@ -898,7 +620,11 @@ impl DicContext {
             // 外部文本：先展开 %func@arg%，再变量替换
             let outside = &text[start..open_index];
             if !outside.is_empty() {
-                let expanded = self.expand_func_at(outside);
+                let expanded = crate::value::expand_func_at(outside,
+                    |f, k| {
+                        let arg_val = self.val.text(&format!("%{}%", k));
+                        self.run_internal_text(&format!("${} {}$", f, arg_val))
+                    });
                 if expanded.contains('\x01') {
                     result.push_str(&expanded);
                 } else {
@@ -991,12 +717,12 @@ impl DicContext {
                                     if let Some(ref pkg_name) = oop_pkg {
                                         if oop_class == *pkg_name {
                                             if let Some(pkg) = self.shared.packages.get(pkg_name) {
-                                                // 构造函数搜索
+                                                // 构造函数优先：$test.测试$ 先执行 [f:测试]new 创建面对像实例
                                                 if let Some((text, _, _)) = crate::functions::search_pkg_ctor(pkg, method) {
                                                     is_ctor = true;
                                                     return Some((text, Vec::new(), Vec::new()));
                                                 }
-                                                // 直接方法搜索（无类名前缀）
+                                                // 方法搜索（兜底）
                                                 if let Some((text, names, defs, _, _)) = crate::functions::search_pkg_method_direct(pkg, method) {
                                                     param_names = names;
                                                     param_defaults = defs;
@@ -1139,7 +865,7 @@ impl DicContext {
                                 } else {
                                     // 实例变量持久化：保存 .field 回主上下文
                                     self.save_instance_vars(&sub_ctx, raw_obj, &resolved_obj);
-                                    result.push_str(&sub_ctx.output.get_print());
+                                    result.push_str(&sub_ctx.val.p.get_cloned("_输出"));
                                 }
                             } else {
                                 // 尝试作为类名.内置函数调用（如 $.回调 → Counter.回调 → 调用 回调 内置函数）
@@ -1249,15 +975,18 @@ impl DicContext {
                             entry(&mut sub_ctx, &code);
                             // 指针变量回写
                             crate::functions::writeback_ptr_vars(self, &sub_ctx, &args[1..], &param_names, 0);
-                            result.push_str(&sub_ctx.output.get_print());
+                            result.push_str(&sub_ctx.val.p.get_cloned("_输出"));
                         }
                     } else {
                         // 跨函数调用 —— 全新变量上下文，变量隔离
                         let mut sub_ctx = self.fresh_sub_context();
                         sub_ctx.sys.line_offset = func_line;
                         sub_ctx.sys.source_file = self.sys.source_file.clone();
-                        // 注入变量：星引入函数用源包的 head 变量（隔离），否则用父上下文变量
-                        crate::functions::inject_star_import_head_vars(self, &mut sub_ctx, func_name);
+                        for (key, val) in self.val.p.iter_local() {
+                            if key != "_输出" {
+                                sub_ctx.val.p.set_string(key, val.display());
+                            }
+                        }
                         let func_name_resolved = self.val.text(func_name);
                         sub_ctx.val.p.set_string("触发", func_name_resolved.clone());
                         sub_ctx.val.p.set_string("self", func_name_resolved.clone());
@@ -1325,7 +1054,7 @@ impl DicContext {
                             entry(&mut sub_ctx, &code);
                             // 指针变量回写
                             crate::functions::writeback_ptr_vars(self, &sub_ctx, &args[1..], &param_names, 0);
-                            result.push_str(&sub_ctx.output.get_print());
+                            result.push_str(&sub_ctx.val.p.get_cloned("_输出"));
                         }
                     }
                 } else {
@@ -1357,7 +1086,7 @@ impl DicContext {
     /// 为内部调用创建子上下文（重置状态机）
     pub(crate) fn clone_for_internal(&self) -> DicContext {
         let mut ctx = self.clone();
-        ctx.output.clear();
+        clear_out(&mut ctx);
         ctx.sys.if_func.success = false;
         ctx.sys.for_state.success = false;
         ctx.sys.for_each.success = false;
@@ -1375,7 +1104,6 @@ impl DicContext {
         DicContext {
             val: DicVal { p, g },
             sys: SysV::default(),
-            output: Output::new(),
             shared: Arc::new(SharedContext {
                 trigger: false,
                 builtins: Arc::clone(&self.shared.builtins),
@@ -1384,7 +1112,6 @@ impl DicContext {
                 local_func: self.shared.local_func.clone(),
                 local_func_map: self.shared.local_func_map.clone(),
                 packages: self.shared.packages.clone(),
-                star_import_funcs: self.shared.star_import_funcs.clone(),
                 triggers: Vec::new(),
                 init_lines: Vec::new(),
             }),
@@ -1562,7 +1289,7 @@ impl Nebula {
                     self.ctx.val.p.set_string(name, val.clone());
                 }
                 entry(&mut self.ctx, &item.text);
-                return Ok(self.ctx.output.get_print());
+                return Ok(self.ctx.val.p.get_cloned("_输出"));
             }
             // 无括号捕获的精确匹配
             let escaped = regex::escape(&item.trigger);
@@ -1571,7 +1298,7 @@ impl Nebula {
                     self.ctx.val.p.set_string("触发", item.trigger.clone());
                     self.ctx.val.p.set_string("行数", i.to_string());
                     entry(&mut self.ctx, &item.text);
-                    return Ok(self.ctx.output.get_print());
+                    return Ok(self.ctx.val.p.get_cloned("_输出"));
                 }
             }
             if escaped != item.trigger {
@@ -1586,7 +1313,7 @@ impl Nebula {
                             }
                         }
                         entry(&mut self.ctx, &item.text);
-                        return Ok(self.ctx.output.get_print());
+                        return Ok(self.ctx.val.p.get_cloned("_输出"));
                     }
                 }
             }
@@ -1595,15 +1322,13 @@ impl Nebula {
     }
 
     /// 执行 [函数] 块
-    /// 返回 (print_output, return_value)
-    pub fn exec_func(&mut self, func_name: &str) -> Result<(String, String), String> {
+    pub fn exec_func(&mut self, func_name: &str) -> Result<String, String> {
         if let Some((code, param_names, _defaults, _is_variadic, func_line)) = self.ctx.find_func_prefix(func_name)
             .or_else(|| self.ctx.find_internal(func_name).map(|c| (c, Vec::new(), Vec::new(), false, 0)))
         {
             self.ctx.sys.line_offset = func_line;
-            let head_print = self.ctx.output.get_print();
-            let head_return = self.ctx.output.get_return();
-            self.ctx.output.clear();
+            let head_print = self.ctx.val.p.get_cloned("_输出");
+            clear_out(&mut self.ctx);
             // 检查 load/init 阶段是否有致命错误（#引入= 等）
             if let Some(err) = self.ctx.sys.error.take() {
                 return Err(err);
@@ -1621,26 +1346,16 @@ impl Nebula {
                 self.ctx.val.p.set_string(p, String::new());
             }
             entry(&mut self.ctx, &code);
-            // 将 _输出 变量内容追加到输出管道（函数执行完毕返回 _输出 数据）
-            let output_content = self.ctx.val.p.get_cloned("_输出");
-            let output_trimmed = output_content.trim().to_string();
-            if !output_trimmed.is_empty() {
-                let display_output = crate::analyzer::unescape_newline(&output_trimmed);
-                self.ctx.output.add_print(&display_output);
-                self.ctx.output.add_print("\n");
-                // 调试模式：同时通过 DebugEvent 发送 _输出 到调试控制台
-                if let Some(ref dbg) = self.ctx.debug {
-                    let _ = dbg.event_tx.send(crate::debug::DebugEvent::Output(format!("{}\n", display_output)));
+            // 函数的 _输出（由 emit 在执行过程中累积）
+            let func_print = self.ctx.val.p.get_cloned("_输出");
+            // 调试模式：与批处理一致，函数结束时将累积的 _输出 统一发送到调试控制台
+            // （执行期间仅 $打印$ 实时发送，普通输出行不发送）
+            if let Some(ref dbg) = self.ctx.debug {
+                if !func_print.is_empty() {
+                    let _ = dbg.event_tx.send(crate::debug::DebugEvent::Output(func_print.clone()));
                 }
             }
-            self.ctx.output.flush_pending();
-            let func_print = self.ctx.output.get_print();
-            let func_return = self.ctx.output.get_return();
-
-            let print_out = format!("{}{}", head_print, func_print);
-            let return_val = format!("{}{}", head_return, func_return);
-
-            Ok((print_out, return_val))
+            Ok(func_print)
         } else {
             Err(format!("函数 '{}' 未找到", func_name))
         }
@@ -1651,6 +1366,6 @@ impl Nebula {
         for item in &self.build.dic {
             entry(&mut self.ctx, &item.text);
         }
-        self.ctx.output.get_print()
+        self.ctx.val.p.get_cloned("_输出")
     }
 }

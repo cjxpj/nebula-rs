@@ -23,7 +23,7 @@ use crate::analyzer::val_text_test;
 use crate::ast::*;
 use crate::count;
 use crate::iftext::IfText;
-use crate::interpreter::entry;
+use crate::interpreter::{entry, emit, clear_out};
 
 /// 解析函数参数定义字符串，检测 ... 可变参数标记
 use crate::functions::parse_param_defs;
@@ -190,10 +190,10 @@ fn parse_one(lines: &[String], idx: usize, stmts: &mut Vec<Stmt>, line_offset: u
         return Ok(1);
     }
 
-    // ===== 旧式 if:/如果: 条件 =====
-    let old_if_consumed = parse_old_if(lines, idx, stmts, line_offset, source_file)?;
-    if old_if_consumed > 0 {
-        return Ok(old_if_consumed);
+    // ===== if:/如果: 条件 =====
+    let if_consumed = parse_if(lines, idx, stmts, line_offset, source_file)?;
+    if if_consumed > 0 {
+        return Ok(if_consumed);
     }
 
     // ===== 块开始 =====
@@ -244,7 +244,6 @@ fn parse_one(lines: &[String], idx: usize, stmts: &mut Vec<Stmt>, line_offset: u
                     target,
                     op,
                     expr,
-                    no_newline: false,
                 });
                 return Ok(1);
             }
@@ -273,7 +272,6 @@ fn parse_one(lines: &[String], idx: usize, stmts: &mut Vec<Stmt>, line_offset: u
                     target: v_prefix.clone(),
                     op: AssignOp::Set,
                     expr: Expr::Lit(Value::Str(marker.to_string())),
-                    no_newline: false,
                 });
             } else if v_type == 6 && (v_suffix == "{" || v_suffix == "[") {
                 // 行内 JSON 块: key:{ ... } 或 key:[ ... ]
@@ -287,7 +285,6 @@ fn parse_one(lines: &[String], idx: usize, stmts: &mut Vec<Stmt>, line_offset: u
                     target: v_prefix.clone(),
                     op,
                     expr,
-                    no_newline,
                 });
             } else if v_type == 5 {
                 // :: — 纯文本赋值：不解析表达式，将右侧原样存为字面量
@@ -298,7 +295,6 @@ fn parse_one(lines: &[String], idx: usize, stmts: &mut Vec<Stmt>, line_offset: u
                     target: v_prefix.clone(),
                     op,
                     expr,
-                    no_newline,
                 });
             } else {
                 let no_newline = v_suffix.ends_with("\\r");
@@ -308,7 +304,6 @@ fn parse_one(lines: &[String], idx: usize, stmts: &mut Vec<Stmt>, line_offset: u
                     target: v_prefix.clone(),
                     op,
                     expr,
-                    no_newline,
                 });
             }
         }
@@ -366,9 +361,9 @@ fn parse_loop_block(lines: &[String], idx: usize, stmts: &mut Vec<Stmt>, line_of
     Err(format!("未闭合的循环块 (第 {} 行)", idx + 1))
 }
 
-/// 解析旧式 if:/如果:/elif: 条件 ... 如果尾/end 块
-/// 返回消费的行数（0 表示不是旧式 if）
-fn parse_old_if(lines: &[String], idx: usize, stmts: &mut Vec<Stmt>, line_offset: usize, source_file: &str) -> Result<usize, String> {
+/// 解析 if:/如果:/elif: 条件 ... 如果尾/end 块
+/// 返回消费的行数（0 表示不是 if 块）
+fn parse_if(lines: &[String], idx: usize, stmts: &mut Vec<Stmt>, line_offset: usize, source_file: &str) -> Result<usize, String> {
     let line = &lines[idx];
 
     let cond_str = if let Some(stripped) = line.strip_prefix("if:") {
@@ -576,7 +571,6 @@ fn parse_inline_json_block(
                 target: var_name.to_string(),
                 op: AssignOp::Set,
                 expr: Expr::Lit(Value::Str(json_str)),
-                no_newline: false,
             });
             return Ok(i - idx + 1);
         }
@@ -1249,9 +1243,6 @@ fn exec_stmts_impl(
         return ExecResult::Stop;
     }
 
-    // Debug: 已发送到调试控制台的 parts 索引，用于避免 drain 时重复发送
-    let mut debug_sent: usize = 0;
-
     while idx >= 0 && idx < len {
         let stmt = &stmts[idx as usize];
 
@@ -1282,22 +1273,10 @@ fn exec_stmts_impl(
 
         match stmt {
             Stmt::Output(text) => {
-                let parts_before = ctx.output.print_len();
+                // 输出仅累积到 _输出；调试模式与批处理一致，函数结束时统一发送
                 exec_output(ctx, text);
-                // Debug: 非 \r 输出立即发送（\r 输出进 pending，函数末尾 flush 时发送）
-                // defer_output 为 true 时跳过实时发送，由父调用者统一处理
-                if let Some(debug_ctx) = debug {
-                    if !debug_ctx.defer_output && ctx.output.print_len() > parts_before {
-                        let new_out = ctx.output.snapshot_print_from(parts_before);
-                        if !new_out.is_empty() {
-                            let _ = debug_ctx.event_tx.send(DebugEvent::Output(new_out));
-                            debug_sent = ctx.output.print_len();
-                        }
-                    }
-                }
             }
-            Stmt::Assign { target, op, expr, no_newline } => {
-                let parts_before = ctx.output.print_len();
+            Stmt::Assign { target, op, expr } => {
                 // Debug: 更新调用者栈帧为当前赋值位置（与 Stmt::FuncCall 一致）
                 if let Some(debug_ctx) = debug {
                     let line = ctx.sys.line_offset + (idx as usize) + 1;
@@ -1312,18 +1291,6 @@ fn exec_stmts_impl(
                 }
                 // 传递 debug 上下文，使 Expr::Call 能推送构造函数堆栈帧
                 exec_assign(ctx, target, op, expr, debug);
-                // \r 语义：赋值表达式仅将值存入变量，不产生额外输出
-                // （\r 后缀表示此行不自动换行，对赋值无输出影响）
-                // Debug: 发送非 \r 的新增输出
-                if let Some(debug_ctx) = debug {
-                    if !debug_ctx.defer_output && !*no_newline && ctx.output.print_len() > parts_before {
-                        let new_out = ctx.output.snapshot_print_from(parts_before);
-                        if !new_out.is_empty() {
-                            let _ = debug_ctx.event_tx.send(DebugEvent::Output(new_out));
-                            debug_sent = ctx.output.print_len();
-                        }
-                    }
-                }
             }
             Stmt::Loop { var, count, condition, cached_tokens, body } => {
                 let holder = sub_debug_for(debug);
@@ -1370,61 +1337,17 @@ fn exec_stmts_impl(
                     ctx.sys.external_labels.entry(k.clone()).or_insert((v, 0));
                 }
                 let effective_no_newline = *no_newline;
-                let snapshot = if effective_no_newline { Some(ctx.output.print_len()) } else { None };
-                // 始终保留 debug 上下文，确保调用栈追踪和逐语句调试正常工作
-                // \r 链时设置 defer_output，子函数 Output 不实时发送，由父函数统一延迟处理
-                let _debug_deferred;
-                let debug_for_call: Option<&DebugContext> = if let Some(dbg) = debug {
-                    if effective_no_newline {
-                        _debug_deferred = DebugContext {
-                            shared: Arc::clone(&dbg.shared),
-                            event_tx: dbg.event_tx.clone(),
-                            cmd_rx: Arc::clone(&dbg.cmd_rx),
-                            depth: dbg.depth,
-                            defer_output: true,
-                        };
-                        Some(&_debug_deferred)
-                    } else {
-                        Some(dbg)
-                    }
-                } else {
-                    None
-                };
-                let parts_before_fc = ctx.output.print_len();
-                let result = exec_func_call(ctx, name, args, debug_for_call);
-                // Debug: 根据 \r 语义决定立即发送还是延迟
-                if let Some(debug_ctx) = debug {
-                    if effective_no_newline {
-                        // \r 调用或链式延迟：移到 pending，函数末尾统一发送
-                        if ctx.sys.last_call_was_ctor && ctx.output.print_len() > parts_before_fc {
-                            // 构造函数：内部输出由 sub_ctx 实时发送，handle 延迟
-                            let handle_idx = ctx.output.print_len() - 1;
-                            if handle_idx > parts_before_fc {
-                                // 仅当 handle 之前还有额外输出时发送（debug=None 走正常路径的场景）
-                                let immediate = ctx.output.snapshot_print_range(parts_before_fc, handle_idx);
-                                if !immediate.is_empty() {
-                                    let _ = debug_ctx.event_tx.send(DebugEvent::Output(immediate));
-                                }
-                                debug_sent = handle_idx;
-                            }
-                            ctx.output.move_last_to_pending();
-                        } else if ctx.output.print_len() > parts_before_fc {
-                            ctx.output.move_tail_to_pending(parts_before_fc);
-                        }
-                        // debug_sent 不更新（或已在上面更新），末尾 drain 会发送 pending
-                    } else if ctx.output.print_len() > parts_before_fc {
-                        // 非延迟：立即发送新增输出
-                        let new_out = ctx.output.snapshot_print_from(parts_before_fc);
-                        if !new_out.is_empty() {
-                            let _ = debug_ctx.event_tx.send(DebugEvent::Output(new_out));
-                        }
-                        debug_sent = ctx.output.print_len();
-                    }
-                } else if effective_no_newline {
-                    if ctx.sys.last_call_was_ctor {
-                        ctx.output.move_last_to_pending();
-                    } else {
-                        ctx.output.move_tail_to_pending(snapshot.unwrap());
+                let snapshot = if effective_no_newline { Some(ctx.val.p.get_cloned("_输出").len()) } else { None };
+                let result = exec_func_call(ctx, name, args, debug);
+                // \r 调用：新增输出去掉尾部换行（无换行语义），输出本身已在子调用中累积
+                if effective_no_newline && !ctx.sys.last_call_was_ctor {
+                    let out = ctx.val.p.get_cloned("_输出");
+                    let idx = snapshot.unwrap();
+                    let new_out = if idx < out.len() { out[idx..].to_string() } else { String::new() };
+                    ctx.val.p.set_string("_输出", out[..idx.min(out.len())].to_string());
+                    if !new_out.is_empty() {
+                        let old = ctx.val.p.get_cloned("_输出");
+                        ctx.val.p.set_string("_输出", format!("{}{}", old, new_out.trim_end_matches('\n')));
                     }
                 }
                 // 处理 exec_func_call 的返回结果（Stop/Skip/Goto）
@@ -1500,15 +1423,19 @@ fn exec_stmts_impl(
                 let final_text = count::run_count_text(&ctx.val, &text_with_funcs);
                 if let Some(debug_ctx) = debug {
                     let _ = debug_ctx.event_tx.send(DebugEvent::Output(final_text));
+                } else if let Some(tx) = crate::debug::dap_event_tx() {
+                    // DAP 模式下的子上下文（无 debug 句柄）：走全局事件通道，禁止直接写 stdout
+                    let _ = tx.send(DebugEvent::Output(final_text));
                 } else {
-                    ctx.output.add_print(&final_text);
+                    // #: 异步输出直接打印到终端，不累积到 _输出
+                    print!("{}", final_text);
                 }
             }
         }
 
         // 检查函数执行错误
         if let Some(msg) = ctx.sys.error.take() {
-            ctx.output.add_print(&msg);
+            emit(ctx, &msg);
             if let Some(debug_ctx) = debug {
                 let _ = debug_ctx.event_tx.send(DebugEvent::Output(msg.clone()));
             }
@@ -1522,16 +1449,6 @@ fn exec_stmts_impl(
         idx += 1;
     }
 
-    ctx.output.flush_pending();
-    // Debug: 仅发送尚未发送的延迟输出（defer_output 时跳过，由父调用者处理）
-    if let Some(debug_ctx) = debug {
-        if !debug_ctx.defer_output {
-            let deferred = ctx.output.drain_print_from(debug_sent);
-            if !deferred.is_empty() {
-                let _ = debug_ctx.event_tx.send(DebugEvent::Output(deferred));
-            }
-        }
-    }
     ExecResult::Continue
 }
 
@@ -1561,7 +1478,7 @@ fn normalize_json_numbers(ctx: &mut DicContext, s: &str) -> String {
 
 /// 输出 JSON 解析错误，并拦截后续执行
 fn json_err(ctx: &mut DicContext, site: &str, detail: &str) {
-    ctx.output.add_print(&format!("\x1b[91m[JSON错误@{site}] 无法解析为合法 JSON: {detail}\x1b[0m\n"));
+    emit(ctx, &format!("\x1b[91m[JSON错误@{site}] 无法解析为合法 JSON: {detail}\x1b[0m\n"));
     ctx.sys.stop = true;
     ctx.sys.error = Some("JSON解析失败".to_string());
 }
@@ -1673,7 +1590,6 @@ fn resolve_json_node(ctx: &mut DicContext, val: &mut serde_json::Value) {
 }
 
 fn exec_output(ctx: &mut DicContext, text: &str) -> String {
-    // 设置行号
     // val.text() 变量替换 → run_internal_text() $...$ 处理 → run_count_text() [...] 求值
     let text_with_vars = ctx.val.text(text);
     let text_with_funcs = ctx.run_internal_text(&text_with_vars);
@@ -1685,8 +1601,9 @@ fn exec_output(ctx: &mut DicContext, text: &str) -> String {
     // 剥离行尾 \r（换行标记），再处理内部转义
     let final_text = final_text.strip_suffix("\\r").unwrap_or(&final_text);
     let display = crate::analyzer::unescape_newline(final_text);
-    let old = ctx.val.p.get_cloned("_输出");
-    ctx.val.p.set_string("_输出", format!("{}{}\n", old, final_text));
+    // 仅累积到 _输出（返回管道），不直接打印
+    emit(ctx, &display);
+    emit(ctx, "\n");
     display
 }
 
@@ -2266,7 +2183,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                     let parsed_stmts = match parse_stmts(&code, false, func_line, &ctx.sys.source_file) {
                         Ok(s) => s,
                         Err(e) => {
-                            ctx.output.add_print(&e);
+                            emit(ctx, &e);
                             return ExecResult::Continue;
                         }
                     };
@@ -2358,7 +2275,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
     // 先查内置函数
     if let Some(&builtin_fn) = ctx.shared.builtins.get(name) {
         if let Some(output) = builtin_fn(ctx, &all_args, &content) {
-            ctx.output.add_print_string(output);
+            emit(ctx, &output);
         }
         return ExecResult::Continue;
     }
@@ -2718,7 +2635,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                         let parsed_stmts = match parse_stmts(&code, false, func_line, &sub_ctx.sys.source_file) {
                             Ok(s) => s,
                             Err(e) => {
-                                ctx.output.add_print(&e);
+                                emit(ctx, &e);
                                 return ExecResult::Continue;
                             }
                         };
@@ -2755,23 +2672,11 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                             return exec_result;
                         }
                         crate::functions::writeback_ptr_vars(ctx, &sub_ctx, &raw_args, &param_names, 0);
-                        // 子函数 _输出 传回调用者
+                        // 子函数 _输出 传回调用者（调试模式与批处理一致：函数结束时统一发送）
                         let sub_output = sub_ctx.val.p.get_cloned("_输出");
                         if !sub_output.is_empty() {
                             let old = ctx.val.p.get_cloned("_输出");
                             ctx.val.p.set_string("_输出", old + &sub_output);
-                        }
-                        // defer_output 时子上下文输出尚未发送
-                        if debug_ctx.defer_output {
-                            if found_is_ctor {
-                                // 构造函数：体内输出通过 DebugEvent 立即发送，不混入返回值
-                                let ctor_output = sub_ctx.output.get_print();
-                                if !ctor_output.is_empty() {
-                                    let _ = debug_ctx.event_tx.send(DebugEvent::Output(ctor_output));
-                                }
-                            } else {
-                                ctx.output.append_print_from(&sub_ctx.output);
-                            }
                         }
                         if found_is_ctor {
                             let class_spec = if use_obj.contains('.') {
@@ -2787,8 +2692,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                             };
                             let handle = crate::functions::pool_alloc_instance(&class_spec);
                             ctx.save_ctor_instance_vars(&sub_ctx, &handle);
-                            // handle 写入返回管道（add_return 同时写入打印管道以保持顺序）
-                            ctx.output.add_return(&handle);
+                            emit(ctx, &handle);
                         } else {
                             ctx.save_instance_vars(&sub_ctx, raw_obj, &resolved_obj);
                         }
@@ -2810,13 +2714,13 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                         // 调试模式：构造函数体内输出通过 DebugEvent::Output 发送
                         // 非调试模式：体内输出追加到父上下文的打印管道
                         if let Some(ref dbg) = ctx.debug {
-                            let ctor_body = sub_ctx.output.get_print();
+                            let ctor_body = sub_ctx.val.p.get_cloned("_输出");
                             if !ctor_body.is_empty() {
                                 let _ = dbg.event_tx.send(DebugEvent::Output(ctor_body));
                             }
-                            sub_ctx.output.clear();
+                            clear_out(ctx);
                         } else {
-                            ctx.output.append_print_from(&sub_ctx.output);
+                            { let sub_out = sub_ctx.val.p.get_cloned("_输出"); if !sub_out.is_empty() { let old = ctx.val.p.get_cloned("_输出"); ctx.val.p.set_string("_输出", format!("{}{}", old, sub_out)); } }
                         }
                         // OOP 构造函数：分配实例池
                         let class_spec = if use_obj.contains('.') {
@@ -2836,20 +2740,19 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                         };
                         let handle = crate::functions::pool_alloc_instance(&class_spec);
                         ctx.save_ctor_instance_vars(&sub_ctx, &handle);
-                        // handle 写入返回管道（add_return 同时写入打印管道以保持顺序）
-                        ctx.output.add_return(&handle);
+                        emit(ctx, &handle);
                     } else {
                         ctx.save_instance_vars(&sub_ctx, raw_obj, &resolved_obj);
-                        ctx.output.append_print_from(&sub_ctx.output);
+                        { let sub_out = sub_ctx.val.p.get_cloned("_输出"); if !sub_out.is_empty() { let old = ctx.val.p.get_cloned("_输出"); ctx.val.p.set_string("_输出", format!("{}{}", old, sub_out)); } }
                     }
                     return ExecResult::Continue;
                 }
                 // 方法未找到 → 原样输出
                 let args_str = args.join(" ");
                 if args_str.is_empty() {
-                    ctx.output.add_print_string(format!("${}$", name));
+                    emit(ctx, &format!("${}$", name));
                 } else {
-                    ctx.output.add_print_string(format!("${} {}$", name, args_str));
+                    emit(ctx, &format!("${} {}$", name, args_str));
                 }
                 return ExecResult::Continue;
             }
@@ -2887,8 +2790,11 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
         sub_ctx.sys.line_offset = func_line;
         sub_ctx.sys.source_file = ctx.sys.source_file.clone();
 
-        // 注入变量：星引入函数用源包的 head 变量（隔离），否则用父上下文变量
-        crate::functions::inject_star_import_head_vars(ctx, &mut sub_ctx, name);
+        for (key, val) in ctx.val.p.iter_local() {
+            if key != "_输出" {
+                sub_ctx.val.p.set_string(key, val.display());
+            }
+        }
 
         // 加载实例变量：
         // 1) ClassName.field → .field（从父上下文加载）
@@ -3028,7 +2934,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                 let parsed_stmts = match parse_stmts(&code, false, func_line, &ctx.sys.source_file) {
                     Ok(s) => s,
                     Err(e) => {
-                        ctx.output.add_print(&e);
+                        emit(ctx, &e);
                         return ExecResult::Continue;
                     }
                 };
@@ -3080,10 +2986,6 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                         ctx.val.p.set_string(key, val.display());
                     }
                 }
-                // defer_output 时子上下文输出尚未发送，追加到父上下文由调用者统一处理
-                if debug_ctx.defer_output {
-                    ctx.output.append_print_from(&sub_ctx.output);
-                }
                 return exec_result;
             }
             // 子函数应拥有独立的 _输出 空间
@@ -3109,7 +3011,6 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
                     ctx.val.p.set_string(key, val.display());
                 }
             }
-            ctx.output.append_print_from(&sub_ctx.output);
         } else {
             let label = if is_variadic { "至少需要" } else { "需要" };
             ctx.sys.error = Some(format!(
@@ -3125,7 +3026,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
         let method = &name[dot_pos + 1..];
         if let Some(&builtin_fn) = ctx.shared.builtins.get(method) {
             if let Some(output) = builtin_fn(ctx, &all_args, &content) {
-                ctx.output.add_print_string(output);
+                emit(ctx, &output);
             }
             return ExecResult::Continue;
         }
@@ -3133,7 +3034,7 @@ fn exec_func_call(ctx: &mut DicContext, name: &str, args: &[String], debug: Opti
 
     // 未找到：保持原样输出
     let fallback = format!("${}$", content);
-    ctx.output.add_print(&fallback);
+    emit(ctx, &fallback);
     ExecResult::Continue
 }
 
@@ -3156,7 +3057,7 @@ fn entry_via_ast(ctx: &mut DicContext, code: &[String]) {
         Err(e) => {
             // JSON 解析错误 → 拦截执行
             if e.contains("[JSON错误]") {
-                ctx.output.add_print(&format!("\x1b[91m{}\x1b[0m\n", e));
+                emit(ctx, &format!("\x1b[91m{}\x1b[0m\n", e));
                 ctx.sys.stop = true;
                 ctx.sys.error = Some(e);
             } else {
@@ -3300,9 +3201,9 @@ pub fn eval_expr(ctx: &mut DicContext, expr: &Expr, debug: Option<&DebugContext>
                     None => return Ok(Value::Str(String::new())),
                 };
 
-                let saved = ctx.output.get_print();
-                let pending_saved = ctx.output.drain_pending();
-                ctx.output.clear();
+                let saved = ctx.val.p.get_cloned("_输出");
+                let output_saved = ctx.val.p.get_cloned("_输出");
+                clear_out(ctx);
 
                 let mut sub_ctx = ctx.fresh_sub_context();
                 sub_ctx.sys.line_offset = ctor_line;
@@ -3321,11 +3222,9 @@ pub fn eval_expr(ctx: &mut DicContext, expr: &Expr, debug: Option<&DebugContext>
                     let parsed_stmts = match parse_stmts(&ctor_code, false, ctor_line, &sub_ctx.sys.source_file) {
                         Ok(s) => s,
                         Err(_e) => {
-                            ctx.output.clear();
-                            ctx.output.add_print_string(saved);
-                            if !pending_saved.is_empty() {
-                                ctx.output.add_pending(&pending_saved);
-                            }
+                            clear_out(ctx);
+                            emit(ctx, &saved);
+                            ctx.val.p.set_string("_输出", output_saved);
                             return Ok(Value::Str(String::new()));
                         }
                     };
@@ -3361,22 +3260,18 @@ pub fn eval_expr(ctx: &mut DicContext, expr: &Expr, debug: Option<&DebugContext>
                     entry_via_ast(&mut sub_ctx, &ctor_code);
                 }
 
-                let ctor_body = sub_ctx.output.get_print();
-                // 调试模式：构造函数输出已在 exec_stmts_impl 中通过 DebugEvent 增量发送
-                // 非调试模式：将构造函数体内输出追加到父上下文输出管道
+                let ctor_body = sub_ctx.val.p.get_cloned("_输出");
 
                 let class_spec = format!("{}.{}", pkg_name, class_name);
                 let handle = crate::functions::pool_alloc_instance(&class_spec);
                 ctx.save_ctor_instance_vars(&sub_ctx, &handle);
 
-                // 恢复原有输出，非调试模式追加构造函数体内输出
-                ctx.output.clear();
-                ctx.output.add_print_string(saved);
-                if !pending_saved.is_empty() {
-                    ctx.output.add_pending(&pending_saved);
-                }
-                if debug.is_none() && !ctor_body.is_empty() {
-                    ctx.output.add_print(&ctor_body);
+                // 恢复原有输出，并追加构造函数体内输出（调试模式与批处理一致：随 _输出 函数结束统一发送）
+                clear_out(ctx);
+                emit(ctx, &saved);
+                ctx.val.p.set_string("_输出", output_saved);
+                if !ctor_body.is_empty() {
+                    emit(ctx, &ctor_body);
                 }
 
                 // handle 作为返回值
@@ -3384,17 +3279,14 @@ pub fn eval_expr(ctx: &mut DicContext, expr: &Expr, debug: Option<&DebugContext>
                 Ok(Value::Str(handle))
             } else {
                 // 执行函数调用，捕获其输出作为返回值（不输出到终端）
-                let saved = ctx.output.get_print();
-                let pending_saved = ctx.output.drain_pending();
-                ctx.output.clear();
+                let saved = ctx.val.p.get_cloned("_输出");
+                let output_saved = ctx.val.p.get_cloned("_输出");
+                clear_out(ctx);
                 exec_func_call(ctx, name, &arg_strs, debug);
-                let result = ctx.output.get_print();
-                ctx.output.clear();
-                ctx.output.add_print_string(saved);
-                // 恢复 delay 缓冲区（\r 输出），避免被 clear() 误清
-                if !pending_saved.is_empty() {
-                    ctx.output.add_pending(&pending_saved);
-                }
+                let result = ctx.val.p.get_cloned("_输出");
+                clear_out(ctx);
+                emit(ctx, &saved);
+                ctx.val.p.set_string("_输出", output_saved);
                 if let Some(err) = ctx.sys.error.take() {
                     return Err(err);
                 }
@@ -3505,7 +3397,7 @@ mod tests {
 
         exec_stmts(&mut ctx, &stmts, None);
 
-        let output = ctx.output.get_print();
+        let output = ctx.val.p.get_cloned("_输出");
 
         assert!(ctx.sys.error.is_none(), "unexpected error: {:?}", ctx.sys.error);
 
@@ -3580,7 +3472,7 @@ mod tests {
         // 执行
         exec_stmts(&mut ctx, &stmts, None);
 
-        let output = ctx.output.get_print();
+        let output = ctx.val.p.get_cloned("_输出");
 
         // 验证：不应有 JSON 解析错误
         assert!(ctx.sys.error.is_none(), "unexpected error: {:?}", ctx.sys.error);
@@ -3626,7 +3518,7 @@ mod tests {
 
         exec_stmts(&mut ctx, &stmts, None);
 
-        let output = ctx.output.get_print();
+        let output = ctx.val.p.get_cloned("_输出");
 
         assert!(ctx.sys.error.is_none(), "unexpected error: {:?}", ctx.sys.error);
 

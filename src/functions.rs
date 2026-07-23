@@ -1,4 +1,6 @@
-use crate::interpreter::{DicContext, BuiltinFn, entry};
+#![allow(unused_doc_comments)]
+
+use crate::interpreter::{DicContext, BuiltinFn, entry, emit};
 use crate::parser::BuildValue;
 use crate::canvas;
 use crate::file_lock;
@@ -95,91 +97,67 @@ pub(crate) fn track_ptr_assign(old_val: &str, new_val: &str) {
     }
 }
 
-fn pool_get_server(id: usize) -> Option<ServerData> {
-    match pool_get(id)? {
-        Instance::Server(s) => Some(s),
-        _ => None,
-    }
+/// 为 Instance 变体统一生成 pool_get / pool_alloc / pool_with 三个配套函数
+macro_rules! pool_methods {
+    ($get_fn:ident, $alloc_fn:ident, $with_fn:ident, $variant:ident, $variant_type:ty) => {
+        fn $get_fn(id: usize) -> Option<$variant_type> {
+            match pool_get(id)? {
+                Instance::$variant(s) => Some(s),
+                _ => None,
+            }
+        }
+        fn $alloc_fn(inst: $variant_type) -> usize {
+            pool_alloc(Instance::$variant(inst))
+        }
+        fn $with_fn<F, R>(id: usize, f: F) -> Option<R>
+        where
+            F: FnOnce(&mut $variant_type) -> R,
+        {
+            let mut pool = INSTANCE_POOL.lock().ok()?;
+            match pool.get_mut(&id) {
+                Some(entry) => match &mut entry.inst {
+                    Instance::$variant(ref mut inner) => Some(f(inner)),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+    };
+    (pub(crate) $get_fn:ident, $alloc_fn:ident, $with_fn:ident, $variant:ident, $variant_type:ty) => {
+        pub(crate) fn $get_fn(id: usize) -> Option<$variant_type> {
+            match pool_get(id)? {
+                Instance::$variant(s) => Some(s),
+                _ => None,
+            }
+        }
+        pub(crate) fn $alloc_fn(inst: $variant_type) -> usize {
+            pool_alloc(Instance::$variant(inst))
+        }
+        pub(crate) fn $with_fn<F, R>(id: usize, f: F) -> Option<R>
+        where
+            F: FnOnce(&mut $variant_type) -> R,
+        {
+            let mut pool = INSTANCE_POOL.lock().ok()?;
+            match pool.get_mut(&id) {
+                Some(entry) => match &mut entry.inst {
+                    Instance::$variant(ref mut inner) => Some(f(inner)),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+    };
 }
 
-/// 分配 Server 实例，返回堆地址
-fn pool_alloc_server(srv: ServerData) -> usize {
-    pool_alloc(Instance::Server(srv))
-}
-
-/// 原子读-改-写：对 pool 中的 Server 执行闭包
-fn pool_with_server<F, R>(id: usize, f: F) -> Option<R>
-where
-    F: FnOnce(&mut ServerData) -> R,
-{
-    let mut pool = INSTANCE_POOL.lock().ok()?;
-    match pool.get_mut(&id) {
-        Some(entry) => match &mut entry.inst {
-            Instance::Server(ref mut srv) => Some(f(srv)),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn pool_get_access(id: usize) -> Option<AccessRequest> {
-    match pool_get(id)? {
-        Instance::Access(req) => Some(req),
-        _ => None,
-    }
-}
-
-/// 分配 Access 实例，返回堆地址
-fn pool_alloc_access(req: AccessRequest) -> usize {
-    pool_alloc(Instance::Access(req))
-}
+pool_methods!(pool_get_server, pool_alloc_server, pool_with_server, Server, ServerData);
+pool_methods!(pool_get_access, pool_alloc_access, pool_with_access, Access, AccessRequest);
 
 /// 检查池中是否存在指定 ID 的实例（不克隆）
 fn pool_has(id: usize) -> bool {
     INSTANCE_POOL.lock().map(|p| p.contains_key(&id)).unwrap_or(false)
 }
 
-/// 原子读-改-写：对 pool 中的 AccessRequest 执行闭包
-fn pool_with_access<F, R>(id: usize, f: F) -> Option<R>
-where
-    F: FnOnce(&mut AccessRequest) -> R,
-{
-    let mut pool = INSTANCE_POOL.lock().ok()?;
-    match pool.get_mut(&id) {
-        Some(entry) => match &mut entry.inst {
-            Instance::Access(ref mut req) => Some(f(req)),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-pub(crate) fn pool_get_class(id: usize) -> Option<ClassInstance> {
-    match pool_get(id)? {
-        Instance::Class(c) => Some(c),
-        _ => None,
-    }
-}
-
-/// 分配 Class 实例，返回堆地址
-pub(crate) fn pool_alloc_class(inst: ClassInstance) -> usize {
-    pool_alloc(Instance::Class(inst))
-}
-
-/// 原子读-改-写：对 pool 中的 ClassInstance 执行闭包
-pub(crate) fn pool_with_class<F, R>(id: usize, f: F) -> Option<R>
-where
-    F: FnOnce(&mut ClassInstance) -> R,
-{
-    let mut pool = INSTANCE_POOL.lock().ok()?;
-    match pool.get_mut(&id) {
-        Some(entry) => match &mut entry.inst {
-            Instance::Class(ref mut ci) => Some(f(ci)),
-            _ => None,
-        },
-        _ => None,
-    }
-}
+pool_methods!(pub(crate) pool_get_class, pool_alloc_class, pool_with_class, Class, ClassInstance);
 
 /// 解析 *N 指针 → 从池中获取 class_spec 和 instance_key
 pub(crate) fn resolve_class_from_pool(raw: &str) -> Option<(String, String)> {
@@ -567,140 +545,154 @@ pub fn register_builtins(ctx: &mut DicContext) {
     let shared = Arc::make_mut(&mut ctx.shared);
     let builtins = Arc::make_mut(&mut shared.builtins);
 
+    macro_rules! register {
+        ($($name:literal => $func:expr),* $(,)?) => {
+            $(builtins.insert($name.to_string(), $func);)*
+        };
+    }
+
     // ===== 引擎核心函数（始终可用）=====
-    builtins.insert("回调".to_string(), callback_fn);
-    builtins.insert("主回调".to_string(), main_callback_fn);
-    builtins.insert("打印".to_string(), print_fn);
-    builtins.insert("打印返回".to_string(), print_return_fn);
-    builtins.insert("创建服务器".to_string(), create_server_fn);
-    builtins.insert("截取".to_string(), substr_fn);
-    builtins.insert("替换".to_string(), replace_fn);
-    builtins.insert("删前缀".to_string(), trim_prefix_fn);
-    builtins.insert("删后缀".to_string(), trim_suffix_fn);
-    builtins.insert("访问".to_string(), access_get_fn);
-    builtins.insert("访问POST".to_string(), access_post_fn);
-    builtins.insert("访问转发".to_string(), request_forward_fn);
-    builtins.insert("ed25519签名".to_string(), ed25519_sign_fn);
-    builtins.insert("hex编码".to_string(), hex_encode_fn);
+    register!(
+        "回调" => callback_fn,
+        "主回调" => main_callback_fn,
+        "打印" => print_fn,
+        "打印返回" => print_return_fn,
+        "创建服务器" => create_server_fn,
+        "截取" => substr_fn,
+        "替换" => replace_fn,
+        "删前缀" => trim_prefix_fn,
+        "删后缀" => trim_suffix_fn,
+        "访问" => access_get_fn,
+        "访问POST" => access_post_fn,
+        "访问转发" => request_forward_fn,
+        "ed25519签名" => ed25519_sign_fn,
+        "hex编码" => hex_encode_fn,
+    );
 
     // ===== 内置基础函数 =====
-    builtins.insert("范围".to_string(), range_fn);
-    builtins.insert("枚举".to_string(), enumerate_fn);
-    builtins.insert("配对".to_string(), zip_fn);
-    builtins.insert("反转".to_string(), reversed_fn);
-    builtins.insert("排序".to_string(), sorted_fn);
-    builtins.insert("全真".to_string(), all_fn);
-    builtins.insert("任一真".to_string(), any_fn);
-    builtins.insert("映射".to_string(), map_fn);
-    builtins.insert("过滤".to_string(), filter_fn);
-    builtins.insert("转布尔".to_string(), to_bool_fn);
-    builtins.insert("码转字".to_string(), chr_fn);
-    builtins.insert("字转码".to_string(), ord_fn);
-    builtins.insert("转二进制".to_string(), bin_fn);
-    builtins.insert("转十六进制".to_string(), hex_fn);
-    builtins.insert("商和余".to_string(), divmod_fn);
-    builtins.insert("长度".to_string(), len_fn);
-    builtins.insert("文本包含".to_string(), contains_fn);
-    builtins.insert("文本分割".to_string(), split_fn);
-    builtins.insert("头尾去空".to_string(), trim_fn);
-    builtins.insert("判断数字".to_string(), is_number_fn);
-    builtins.insert("大写".to_string(), upper_fn);
-    builtins.insert("小写".to_string(), lower_fn);
-    builtins.insert("查找".to_string(), find_fn);
-    builtins.insert("计数".to_string(), count_sub_fn);
-    builtins.insert("开头判断".to_string(), starts_with_fn);
-    builtins.insert("结尾判断".to_string(), ends_with_fn);
-    builtins.insert("文本连接".to_string(), join_fn);
-    builtins.insert("文本重复".to_string(), repeat_fn);
-    builtins.insert("判断字母".to_string(), is_alpha_fn);
-    builtins.insert("判断小写".to_string(), is_lower_fn);
-    builtins.insert("判断大写".to_string(), is_upper_fn);
-    builtins.insert("判断空白".to_string(), is_space_fn);
-    builtins.insert("首字母大写".to_string(), title_fn);
-    builtins.insert("大小写互换".to_string(), swap_case_fn);
-    builtins.insert("左对齐".to_string(), ljust_fn);
-    builtins.insert("右对齐".to_string(), rjust_fn);
-    builtins.insert("居中".to_string(), center_fn);
-    builtins.insert("转文本".to_string(), to_string_fn);
-    builtins.insert("转数字".to_string(), to_number_fn);
-    builtins.insert("转整数".to_string(), to_int_fn);
-    builtins.insert("转浮点".to_string(), to_float_fn);
-    builtins.insert("绝对值".to_string(), abs_fn);
-    builtins.insert("最大值".to_string(), max_fn);
-    builtins.insert("最小值".to_string(), min_fn);
-    builtins.insert("取整".to_string(), round_fn);
-    builtins.insert("幂运算".to_string(), pow_fn);
-    builtins.insert("求和".to_string(), sum_fn);
-    builtins.insert("向上取整".to_string(), ceil_fn);
-    builtins.insert("向下取整".to_string(), floor_fn);
-    builtins.insert("平方根".to_string(), sqrt_fn);
-    builtins.insert("随机数".to_string(), random_fn);
-    builtins.insert("写文件".to_string(), write_string_file_fn);
-    builtins.insert("读文件".to_string(), read_string_file_fn);
-    builtins.insert("写".to_string(), write_key_string_file_fn);
-    builtins.insert("读".to_string(), read_key_string_file_fn);
-    builtins.insert("删除文件".to_string(), delete_file_fn);
-    builtins.insert("删除文件夹".to_string(), delete_dir_fn);
-    builtins.insert("存在文件".to_string(), file_exist_fn);
-    builtins.insert("存在文件夹".to_string(), dir_exist_fn);
-    builtins.insert("存在文件或文件夹".to_string(), file_or_dir_exist_fn);
-    builtins.insert("文件后缀".to_string(), file_suffix_fn);
-    builtins.insert("文件头部".to_string(), file_header_fn);
-    builtins.insert("读文件行".to_string(), read_file_lines_fn);
-    builtins.insert("文件夹列表".to_string(), dir_list_fn);
-    builtins.insert("文件列表".to_string(), file_list_fn);
-    builtins.insert("随机文件夹名".to_string(), random_dir_name_fn);
-    builtins.insert("随机文件名".to_string(), random_file_name_fn);
-    builtins.insert("文件夹大小".to_string(), dir_size_fn);
-    builtins.insert("文件大小".to_string(), file_size_fn);
-    builtins.insert("重命名".to_string(), file_rename_fn);
-    builtins.insert("复制粘贴".to_string(), file_copy_fn);
-    builtins.insert("下载文件".to_string(), download_file_fn);
+    register!(
+        "范围" => range_fn,
+        "枚举" => enumerate_fn,
+        "配对" => zip_fn,
+        "反转" => reversed_fn,
+        "排序" => sorted_fn,
+        "全真" => all_fn,
+        "任一真" => any_fn,
+        "映射" => map_fn,
+        "过滤" => filter_fn,
+        "转布尔" => to_bool_fn,
+        "码转字" => chr_fn,
+        "字转码" => ord_fn,
+        "转二进制" => bin_fn,
+        "转十六进制" => hex_fn,
+        "商和余" => divmod_fn,
+        "长度" => len_fn,
+        "文本包含" => contains_fn,
+        "文本分割" => split_fn,
+        "头尾去空" => trim_fn,
+        "判断数字" => is_number_fn,
+        "大写" => upper_fn,
+        "小写" => lower_fn,
+        "查找" => find_fn,
+        "计数" => count_sub_fn,
+        "开头判断" => starts_with_fn,
+        "结尾判断" => ends_with_fn,
+        "文本连接" => join_fn,
+        "文本重复" => repeat_fn,
+        "判断字母" => is_alpha_fn,
+        "判断小写" => is_lower_fn,
+        "判断大写" => is_upper_fn,
+        "判断空白" => is_space_fn,
+        "首字母大写" => title_fn,
+        "大小写互换" => swap_case_fn,
+        "左对齐" => ljust_fn,
+        "右对齐" => rjust_fn,
+        "居中" => center_fn,
+        "转文本" => to_string_fn,
+        "转数字" => to_number_fn,
+        "转整数" => to_int_fn,
+        "转浮点" => to_float_fn,
+        "绝对值" => abs_fn,
+        "最大值" => max_fn,
+        "最小值" => min_fn,
+        "取整" => round_fn,
+        "幂运算" => pow_fn,
+        "求和" => sum_fn,
+        "向上取整" => ceil_fn,
+        "向下取整" => floor_fn,
+        "平方根" => sqrt_fn,
+        "随机数" => random_fn,
+        "写文件" => write_string_file_fn,
+        "读文件" => read_string_file_fn,
+        "写" => write_key_string_file_fn,
+        "读" => read_key_string_file_fn,
+        "删除文件" => delete_file_fn,
+        "删除文件夹" => delete_dir_fn,
+        "存在文件" => file_exist_fn,
+        "存在文件夹" => dir_exist_fn,
+        "存在文件或文件夹" => file_or_dir_exist_fn,
+        "文件后缀" => file_suffix_fn,
+        "文件头部" => file_header_fn,
+        "读文件行" => read_file_lines_fn,
+        "文件夹列表" => dir_list_fn,
+        "文件列表" => file_list_fn,
+        "随机文件夹名" => random_dir_name_fn,
+        "随机文件名" => random_file_name_fn,
+        "文件夹大小" => dir_size_fn,
+        "文件大小" => file_size_fn,
+        "重命名" => file_rename_fn,
+        "复制粘贴" => file_copy_fn,
+        "下载文件" => download_file_fn,
+    );
 
     // ===== 访问（HTTP 客户端）=====
-    builtins.insert("创建访问".to_string(), create_access_fn);
-    builtins.insert("切换GET".to_string(), change_get_fn);
-    builtins.insert("切换POST".to_string(), change_post_fn);
-    builtins.insert("POST".to_string(), request_post_fn);
-    builtins.insert("POST文件".to_string(), request_post_file_fn);
-    builtins.insert("启用跳转".to_string(), enable_redirects_fn);
-    builtins.insert("禁用跳转".to_string(), disable_redirects_fn);
-    builtins.insert("设置头部".to_string(), set_headers_fn);
-    builtins.insert("设置超时".to_string(), set_timeout_fn);
-    builtins.insert("发送".to_string(), request_send_fn);
-    builtins.insert("全部内容".to_string(), request_all_content_fn);
-    builtins.insert("内容".to_string(), request_content_fn);
+    register!(
+        "创建访问" => create_access_fn,
+        "切换GET" => change_get_fn,
+        "切换POST" => change_post_fn,
+        "POST" => request_post_fn,
+        "POST文件" => request_post_file_fn,
+        "启用跳转" => enable_redirects_fn,
+        "禁用跳转" => disable_redirects_fn,
+        "设置头部" => set_headers_fn,
+        "设置超时" => set_timeout_fn,
+        "发送" => request_send_fn,
+        "全部内容" => request_all_content_fn,
+        "内容" => request_content_fn,
+    );
 
     // ===== 画布 =====
-    builtins.insert("创建画布".to_string(), canvas_new_fn);
-    builtins.insert("画布获取".to_string(), canvas_get_fn);
-    builtins.insert("画笔设置颜色".to_string(), canvas_brush_color_fn);
-    builtins.insert("画笔获取颜色".to_string(), canvas_brush_get_color_fn);
-    builtins.insert("画笔大小".to_string(), canvas_brush_size_fn);
-    builtins.insert("绘制点".to_string(), canvas_draw_point_fn);
-    builtins.insert("绘制线".to_string(), canvas_draw_line_fn);
-    builtins.insert("绘制喷漆".to_string(), canvas_brush_line_fn);
-    builtins.insert("绘制波浪".to_string(), canvas_wave_line_fn);
-    builtins.insert("绘制油漆桶".to_string(), canvas_flood_fill_fn);
-    builtins.insert("绘制方形".to_string(), canvas_draw_rect_fill_fn);
-    builtins.insert("绘制方形描边".to_string(), canvas_draw_rect_stroke_fn);
-    builtins.insert("绘制椭圆".to_string(), canvas_draw_ellipse_fill_fn);
-    builtins.insert("绘制椭圆描边".to_string(), canvas_draw_ellipse_stroke_fn);
-    builtins.insert("绘制圆形".to_string(), canvas_draw_pie_fill_fn);
-    builtins.insert("绘制圆形描边".to_string(), canvas_draw_pie_stroke_fn);
-    builtins.insert("绘制多边形".to_string(), canvas_polygon_fn);
-    builtins.insert("绘制多边形描边".to_string(), canvas_polygon_stroke_fn);
-    builtins.insert("绘制圆弧".to_string(), canvas_draw_arc_fn);
-    builtins.insert("绘制图片".to_string(), canvas_draw_image_fn);
-    builtins.insert("绘制文本".to_string(), canvas_draw_text_fn);
-    builtins.insert("绘制随机点".to_string(), canvas_random_dots_fn);
-    builtins.insert("绘制随机线条".to_string(), canvas_random_lines_fn);
-    builtins.insert("画布灰度".to_string(), canvas_grayscale_fn);
-    builtins.insert("画布马赛克".to_string(), canvas_mosaic_all_fn);
-    builtins.insert("绘制马赛克".to_string(), canvas_draw_mosaic_fn);
-    builtins.insert("绘制高斯模糊".to_string(), canvas_draw_blur_fn);
-    builtins.insert("画布旋转".to_string(), canvas_rotate_fn);
-    builtins.insert("画布圆形".to_string(), canvas_round_corners_fn);
+    register!(
+        "创建画布" => canvas_new_fn,
+        "画布获取" => canvas_get_fn,
+        "画笔设置颜色" => canvas_brush_color_fn,
+        "画笔获取颜色" => canvas_brush_get_color_fn,
+        "画笔大小" => canvas_brush_size_fn,
+        "绘制点" => canvas_draw_point_fn,
+        "绘制线" => canvas_draw_line_fn,
+        "绘制喷漆" => canvas_brush_line_fn,
+        "绘制波浪" => canvas_wave_line_fn,
+        "绘制油漆桶" => canvas_flood_fill_fn,
+        "绘制方形" => canvas_draw_rect_fill_fn,
+        "绘制方形描边" => canvas_draw_rect_stroke_fn,
+        "绘制椭圆" => canvas_draw_ellipse_fill_fn,
+        "绘制椭圆描边" => canvas_draw_ellipse_stroke_fn,
+        "绘制圆形" => canvas_draw_pie_fill_fn,
+        "绘制圆形描边" => canvas_draw_pie_stroke_fn,
+        "绘制多边形" => canvas_polygon_fn,
+        "绘制多边形描边" => canvas_polygon_stroke_fn,
+        "绘制圆弧" => canvas_draw_arc_fn,
+        "绘制图片" => canvas_draw_image_fn,
+        "绘制文本" => canvas_draw_text_fn,
+        "绘制随机点" => canvas_random_dots_fn,
+        "绘制随机线条" => canvas_random_lines_fn,
+        "画布灰度" => canvas_grayscale_fn,
+        "画布马赛克" => canvas_mosaic_all_fn,
+        "绘制马赛克" => canvas_draw_mosaic_fn,
+        "绘制高斯模糊" => canvas_draw_blur_fn,
+        "画布旋转" => canvas_rotate_fn,
+        "画布圆形" => canvas_round_corners_fn,
+    );
 }
 
 /// 以 swap 共享变量池方式执行子调用，变更直接作用到父级
@@ -729,7 +721,7 @@ fn run_with_shared_val(
         std::mem::swap(&mut ctx.val, &mut sub_ctx.val);
         return None;
     }
-    let output = Some(sub_ctx.output.get_print());
+    let output = Some(sub_ctx.val.p.get_cloned("_输出"));
     std::mem::swap(&mut ctx.val, &mut sub_ctx.val);
     output
 }
@@ -789,21 +781,31 @@ fn print_core(ctx: &mut DicContext, args: &[String]) -> String {
     crate::count::run_count_text(&ctx.val, &texted)
 }
 
-/// $打印 内容$ — 输出到管道，不返回值
+/// $打印 内容$ — 调试模式走调试控制台，否则打印到终端；不返回值
 fn print_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let result = print_core(ctx, args);
-    let display = crate::analyzer::unescape_newline(&result);
-    ctx.output.add_print(&format!("{}\n", display));
+    if let Some(ref dbg) = ctx.debug {
+        let _ = dbg.event_tx.send(crate::debug::DebugEvent::Output(format!("{}\n", result)));
+    } else if let Some(tx) = crate::debug::dap_event_tx() {
+        // DAP 模式下的子上下文（无 debug 句柄）：走全局事件通道，禁止直接写 stdout
+        let _ = tx.send(crate::debug::DebugEvent::Output(format!("{}\n", result)));
+    } else {
+        print!("{}\n", result);
+    }
     None
 }
 
-/// $打印返回 内容$ — 输出到打印管道并返回值（同时写入返回管道）
+/// $打印返回 内容$ — 调试模式走调试控制台，否则打印到终端；并返回值
 fn print_return_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let result = print_core(ctx, args);
-    let display = crate::analyzer::unescape_newline(&result);
-    let formatted = format!("{}\n", display);
-    ctx.output.add_print(&formatted);
-    ctx.output.add_return(&result);
+    if let Some(ref dbg) = ctx.debug {
+        let _ = dbg.event_tx.send(crate::debug::DebugEvent::Output(format!("{}\n", result)));
+    } else if let Some(tx) = crate::debug::dap_event_tx() {
+        // DAP 模式下的子上下文（无 debug 句柄）：走全局事件通道，禁止直接写 stdout
+        let _ = tx.send(crate::debug::DebugEvent::Output(format!("{}\n", result)));
+    } else {
+        println!("{}", result);
+    }
     Some(result)
 }
 
@@ -892,7 +894,7 @@ fn run_server(
     let listener = match TcpListener::bind(&bind_addr) {
         Ok(l) => l,
         Err(e) => {
-            ctx.output.add_print(&format!("[Nebula] 服务器启动失败: {}\n", e));
+            emit(ctx, &format!("[Nebula] 服务器启动失败: {}\n", e));
             return Some(format!("[错误] {} 服务器启动失败: {}", ctx.sys.file_location(), e));
         }
     };
@@ -903,7 +905,7 @@ fn run_server(
         let stream = match stream {
             Ok(s) => s,
             Err(e) => {
-                ctx.output.add_print(&format!("[Nebula] 连接错误: {}\n", e));
+                emit(ctx, &format!("[Nebula] 连接错误: {}\n", e));
                 continue;
             }
         };
@@ -1092,7 +1094,7 @@ fn run_server(
                 }
                 let rheader_raw = crate::value::Scope::lookup_display("_设置头部", &req_ctx.val.p, Some(req_ctx.val.g.get_all()));
                 let status_code = crate::value::Scope::lookup_display("_状态码", &req_ctx.val.p, Some(req_ctx.val.g.get_all()));
-                let body = req_ctx.output.get_print();
+                let body = req_ctx.val.p.get_cloned("_输出");
                 std::mem::swap(&mut base_ctx.val, &mut req_ctx.val);
                 (body, rheader_raw, status_code)
             } else {
@@ -1220,7 +1222,7 @@ fn handle_tcp_request(
         if !Arc::ptr_eq(&base_ctx.shared, &req_ctx.shared) {
             base_ctx.shared = req_ctx.shared.clone();
         }
-        let output = req_ctx.output.get_print();
+        let output = req_ctx.val.p.get_cloned("_输出");
         std::mem::swap(&mut base_ctx.val, &mut req_ctx.val);
         (output, true)
     } else {
@@ -1336,7 +1338,7 @@ fn match_tcp_trigger(base_ctx: &DicContext, trigger: &str) -> String {
                 req_ctx.val.p.set_string(name, val.clone());
             }
             entry(&mut req_ctx, &text);
-            req_ctx.output.get_print()
+            req_ctx.val.p.get_cloned("_输出")
         }
         None => String::new(),
     }
@@ -2394,6 +2396,38 @@ macro_rules! canvas_err {
 }
 
 /// $创建画布 [width] [height] [bgColor]$ — 生成并返回画布对象结构体
+// ==================== 画布操作宏 ====================
+
+/// 生成画布绘制类函数（返回 Result<Option<String>, E> 的标准模式）
+macro_rules! canvas_draw_fn {
+    ($name:ident, $func:path) => {
+        fn $name(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+            let resolved = resolve_canvas_args(ctx, args);
+            match $func(&resolved) {
+                Ok(None) => None,
+                Ok(Some(s)) => Some(s),
+                Err(e) => canvas_err!(ctx, e),
+            }
+        }
+    };
+}
+
+/// 生成画布取值类函数（返回 Result<String, E> 的标准模式）
+macro_rules! canvas_value_fn {
+    ($name:ident, $func:path) => {
+        fn $name(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
+            let resolved = resolve_canvas_args(ctx, args);
+            match $func(&resolved) {
+                Ok(s) => Some(s),
+                Err(e) => canvas_err!(ctx, e),
+            }
+        }
+    };
+}
+
+// ==================== 画布操作 ====================
+
+/// $画布.新建 [width] [height] [format]$
 fn canvas_new_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
     let resolved = resolve_args(ctx, args);
     match canvas::canvas_new(&resolved) {
@@ -2416,14 +2450,8 @@ fn canvas_new_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Optio
     }
 }
 
-/// $画布.获取 [format]$
-fn canvas_get_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::canvas_get(&resolved) {
-        Ok(data) => Some(data),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+// $画布.获取 [format]$
+canvas_value_fn!(canvas_get_fn, canvas::canvas_get);
 
 /// $画笔.设置颜色 [color]$
 fn canvas_brush_color_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
@@ -2444,13 +2472,7 @@ fn canvas_brush_color_fn(ctx: &mut DicContext, args: &[String], _content: &str) 
 }
 
 /// $画笔.获取颜色$
-fn canvas_brush_get_color_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::brush_get_color(&resolved) {
-        Ok(s) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_value_fn!(canvas_brush_get_color_fn, canvas::brush_get_color);
 
 /// $画笔.大小 [size]$
 fn canvas_brush_size_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
@@ -2470,154 +2492,49 @@ fn canvas_brush_size_fn(ctx: &mut DicContext, args: &[String], _content: &str) -
 }
 
 /// $绘制.点 x y [color]$
-fn canvas_draw_point_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_point(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_draw_point_fn, canvas::draw_point);
 
 /// $绘制.线 x1 y1 x2 y2 [color]$
-fn canvas_draw_line_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_line(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_draw_line_fn, canvas::draw_line);
 
 /// $绘制.方形 x y w h [radius] [color]$
-fn canvas_draw_rect_fill_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_rect_fill(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_draw_rect_fill_fn, canvas::draw_rect_fill);
 
 /// $绘制.方形描边 x y w h [radius] [color]$
-fn canvas_draw_rect_stroke_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_rect_stroke(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_draw_rect_stroke_fn, canvas::draw_rect_stroke);
 
 /// $绘制.椭圆 x y w h [color]$
-fn canvas_draw_ellipse_fill_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_ellipse_fill(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_draw_ellipse_fill_fn, canvas::draw_ellipse_fill);
 
 /// $绘制.椭圆描边 x y w h [color]$
-fn canvas_draw_ellipse_stroke_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_ellipse_stroke(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_draw_ellipse_stroke_fn, canvas::draw_ellipse_stroke);
 
 /// $绘制.圆形 cx cy [radius] [startDeg] [endDeg] [color]$
-fn canvas_draw_pie_fill_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_pie_fill(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_draw_pie_fill_fn, canvas::draw_pie_fill);
 
 /// $绘制.圆形描边 cx cy [radius] [startDeg] [endDeg] [color]$
-fn canvas_draw_pie_stroke_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_pie_stroke(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_draw_pie_stroke_fn, canvas::draw_pie_stroke);
 
 /// $绘制.圆弧 cx cy radius startDeg endDeg [color]$
-fn canvas_draw_arc_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_arc(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_draw_arc_fn, canvas::draw_arc);
 
 /// $绘制.图片 srcData x y [alpha]$
-fn canvas_draw_image_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_image(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_draw_image_fn, canvas::draw_image);
 
 /// $绘制.文本 x y text [color] [strokeColor] [strokeWidth]$
-fn canvas_draw_text_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_text(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_draw_text_fn, canvas::draw_text);
 
 /// $画布.灰度$
-fn canvas_grayscale_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::canvas_grayscale(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_grayscale_fn, canvas::canvas_grayscale);
 
 /// $画布.马赛克 [blockSize]$
-fn canvas_mosaic_all_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::canvas_mosaic_all(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_mosaic_all_fn, canvas::canvas_mosaic_all);
 
 /// $绘制.马赛克 x y w h$
-fn canvas_draw_mosaic_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_mosaic(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_draw_mosaic_fn, canvas::draw_mosaic);
 
 /// $绘制.高斯模糊 x y w h$
-fn canvas_draw_blur_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_gaussian_blur(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_draw_blur_fn, canvas::draw_gaussian_blur);
 
 /// $画布.旋转 degrees [bgColor]$
 fn canvas_rotate_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
@@ -2638,84 +2555,28 @@ fn canvas_rotate_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
 }
 
 /// $画布.圆形 radius [bgColor]$
-fn canvas_round_corners_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::canvas_round_corners(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_round_corners_fn, canvas::canvas_round_corners);
 
 /// $绘制.喷漆 x1 y1 x2 y2 [rangeRadius] [density] [color] [pointRadius]$
-fn canvas_brush_line_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_brush_line(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_brush_line_fn, canvas::draw_brush_line);
 
 /// $绘制.波浪 x1 y1 x2 y2 [amplitude] [wavelength] [step]$
-fn canvas_wave_line_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_wave_line(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_wave_line_fn, canvas::draw_wave_line);
 
 /// $绘制.油漆桶 x y [fillColor]$
-fn canvas_flood_fill_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_flood_fill(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_flood_fill_fn, canvas::draw_flood_fill);
 
 /// $绘制.随机点 [dotCount]$
-fn canvas_random_dots_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_random_dots(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_random_dots_fn, canvas::draw_random_dots);
 
 /// $绘制.随机线条 [lineCount]$
-fn canvas_random_lines_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_random_lines(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_random_lines_fn, canvas::draw_random_lines);
 
 /// $绘制.多边形 x,y x,y ... [color]$
-fn canvas_polygon_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_polygon(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_polygon_fn, canvas::draw_polygon);
 
 /// $绘制.多边形描边 x,y x,y ... [color]$
-fn canvas_polygon_stroke_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Option<String> {
-    let resolved = resolve_canvas_args(ctx, args);
-    match canvas::draw_polygon_stroke(&resolved) {
-        Ok(None) => None,
-        Ok(Some(s)) => Some(s),
-        Err(e) => canvas_err!(ctx, e),
-    }
-}
+canvas_draw_fn!(canvas_polygon_stroke_fn, canvas::draw_polygon_stroke);
 
 // ==================== 文件读写 ====================
 
@@ -3224,7 +3085,7 @@ fn download_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
             .map_err(|e| format!("读取失败: {}", e))
             .map(|_| ())
     })() {
-        ctx.output.add_print(&format!("[Nebula] {}\n", e));
+        emit(ctx, &format!("[Nebula] {}\n", e));
         return Some(String::new());
     }
     // 写入文件时加写锁
@@ -3232,7 +3093,7 @@ fn download_file_fn(ctx: &mut DicContext, args: &[String], _content: &str) -> Op
     match file_lock::with_file_write(&save_path_buf, || std::fs::write(&save_path, &data)) {
         Ok(()) => Some("true".to_string()),
         Err(e) => {
-            ctx.output.add_print(&format!("[Nebula] {}\n", e));
+            emit(ctx, &format!("[Nebula] {}\n", e));
             Some(String::new())
         }
     }
@@ -3480,24 +3341,6 @@ pub(crate) fn search_pkg_method_direct(
     fuzzy_search_pkg_method(pkg, method)
 }
 
-/// 注入星引入函数的 head 变量到子上下文（隔离），否则复制父上下文变量
-pub(crate) fn inject_star_import_head_vars(ctx: &DicContext, sub_ctx: &mut DicContext, name: &str) {
-    if let Some(pkg_name) = ctx.shared.star_import_funcs.get(name) {
-        if let Some(pkg_bv) = ctx.shared.packages.get(pkg_name) {
-            for line in &pkg_bv.head {
-                let (v_type, v_prefix, v_suffix) = crate::analyzer::val_text_test(line);
-                if v_type == 6 && !v_prefix.is_empty() {
-                    let value = sub_ctx.val.text(&v_suffix);
-                    sub_ctx.val.p.set_string(&v_prefix, value);
-                }
-            }
-        }
-    } else {
-        for (key, val) in ctx.val.p.iter_local() {
-            sub_ctx.val.p.set_string(key, val.display());
-        }
-    }
-}
 
 /// 指针变量回写：将 %var% 形式传入的参数在子上下文修改后的值回写到父上下文的 *var
 pub(crate) fn writeback_ptr_vars(ctx: &mut DicContext, sub_ctx: &DicContext, raw_args: &[String], param_names: &[String], arg_offset: usize) {

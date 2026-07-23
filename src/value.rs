@@ -824,6 +824,98 @@ fn urlencoding_encode(input: &str) -> String {
 
 /* ===================== DicVal ===================== */
 
+/// 预处理 %func@arg% 语法：扫描文本中的 %函数名@参数变量%，通过 exec_call 回调执行替换
+/// exec_call 接收 (函数名, 参数变量名)，返回替换文本
+pub fn expand_func_at<E>(text: &str, mut exec_call: E) -> String
+where E: FnMut(&str, &str) -> String
+{
+    if !text.contains('@') {
+        return text.to_string();
+    }
+    const KNOWN_AT_PREFIXES: &[&str] = &["TYPE@", "B64@", "len@", "长度@", "URL编码@", "func@"];
+
+    let mut result = String::with_capacity(text.len());
+    let mut rest = text;
+
+    loop {
+        match rest.find('%') {
+            None => { result.push_str(rest); break; }
+            Some(pct) => {
+                result.push_str(&rest[..pct]);
+                rest = &rest[pct + 1..];
+
+                match rest.find('%') {
+                    None => { result.push('%'); result.push_str(rest); break; }
+                    Some(close) => {
+                        let inner = &rest[..close];
+                        rest = &rest[close + 1..];
+
+                        if inner.is_empty() || !inner.contains('@') {
+                            result.push('%');
+                            result.push_str(inner);
+                            result.push('%');
+                            continue;
+                        }
+                        if KNOWN_AT_PREFIXES.iter().any(|p| inner.starts_with(p))
+                            || inner.starts_with('@')
+                        {
+                            result.push('%');
+                            result.push_str(inner);
+                            result.push('%');
+                            continue;
+                        }
+                        if let Some(at_pos) = inner.find('@') {
+                            let func_name = &inner[..at_pos];
+                            let arg_key = &inner[at_pos + 1..];
+                            let call_result = exec_call(func_name, arg_key);
+                            result.push_str(&call_result);
+                        } else {
+                            result.push('%');
+                            result.push_str(inner);
+                            result.push('%');
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/* ===================== DicVal ===================== */
+
+/// 预处理 %++var% / %--var%：变量自增/自减辅助宏（模块级定义，impl 内调用）
+macro_rules! incr_decr_fn {
+    ($name:ident, $delim:literal, $op:expr) => {
+        fn $name(&mut self, input: &str) -> String {
+            if !input.contains($delim) {
+                return input.to_string();
+            }
+            let mut result = String::with_capacity(input.len());
+            let mut rest = input;
+            let delim_len = $delim.len();
+            while let Some(pct) = rest.find($delim) {
+                result.push_str(&rest[..pct]);
+                rest = &rest[pct + delim_len..];
+                if let Some(close) = rest.find('%') {
+                    let var_name = &rest[..close];
+                    let current = self.p.get_cloned(var_name);
+                    let current_num: i64 = if current.is_empty() { 0 } else { current.parse().unwrap_or(0) };
+                    let new_val = $op(current_num);
+                    self.p.set_string(var_name, new_val.to_string());
+                    result.push_str(&new_val.to_string());
+                    rest = &rest[close + 1..];
+                } else {
+                    result.push_str($delim);
+                }
+            }
+            result.push_str(rest);
+            result
+        }
+    };
+}
+
 /// 词库双层变量存储：本地作用域 + 全局作用域
 ///
 /// - `p`: 本地变量（含 enclosing 链，支持 Python 风格链式查找）
@@ -851,7 +943,7 @@ impl DicVal {
             return input.to_string();
         }
         let input = self.resolve_incr(input);
-        let input = self.resolve_decr(input);
+        let input = self.resolve_decr(&input);
         Scope::text_with_vals(&input, &self.p, Some(self.g.get_all()))
     }
 
@@ -867,57 +959,8 @@ impl DicVal {
         Scope::text_with_vals(input, &self.p, Some(self.g.get_all()))
     }
 
-    /// 预处理 %++var%：变量自增
-    fn resolve_incr(&mut self, input: &str) -> String {
-        if !input.contains("%++") {
-            return input.to_string();
-        }
-        let mut result = String::with_capacity(input.len());
-        let mut rest = input;
-        while let Some(pct) = rest.find("%++") {
-            result.push_str(&rest[..pct]);
-            rest = &rest[pct + 3..];
-            if let Some(close) = rest.find('%') {
-                let var_name = &rest[..close];
-                let current = self.p.get_cloned(var_name);
-                let current_num: i64 = if current.is_empty() { 0 } else { current.parse().unwrap_or(0) };
-                let new_val = current_num + 1;
-                self.p.set_string(var_name, new_val.to_string());
-                result.push_str(&new_val.to_string());
-                rest = &rest[close + 1..];
-            } else {
-                result.push_str("%++");
-            }
-        }
-        result.push_str(rest);
-        result
-    }
-
-    /// 预处理 %--var%：变量自减
-    fn resolve_decr(&mut self, input: String) -> String {
-        if !input.contains("%--") {
-            return input;
-        }
-        let mut result = String::with_capacity(input.len());
-        let mut rest: &str = &input;
-        while let Some(pct) = rest.find("%--") {
-            result.push_str(&rest[..pct]);
-            rest = &rest[pct + 3..];
-            if let Some(close) = rest.find('%') {
-                let var_name = &rest[..close];
-                let current = self.p.get_cloned(var_name);
-                let current_num: i64 = if current.is_empty() { 0 } else { current.parse().unwrap_or(0) };
-                let new_val = current_num - 1;
-                self.p.set_string(var_name, new_val.to_string());
-                result.push_str(&new_val.to_string());
-                rest = &rest[close + 1..];
-            } else {
-                result.push_str("%--");
-            }
-        }
-        result.push_str(rest);
-        result
-    }
+    incr_decr_fn!(resolve_incr, "%++", |n| n + 1);
+    incr_decr_fn!(resolve_decr, "%--", |n| n - 1);
 
     // ─── 全局变量访问（通过链根写入） ───
 

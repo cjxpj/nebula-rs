@@ -95,27 +95,20 @@ pub fn val_text_test(text: &str) -> (i8, String, String) {
     let rest: String = chars[i..].iter().collect();
 
     // 操作符解析
-    if rest.len() >= 2 && rest.starts_with("-:") {
-        return (1, prefix, rest[2..].to_string());
+    macro_rules! try_op {
+        ($op:literal, $ty:expr) => {
+            if let Some(stripped) = rest.strip_prefix($op) {
+                return ($ty, prefix, stripped.to_string());
+            }
+        };
     }
-    if rest.len() >= 2 && rest.starts_with("+:") {
-        return (2, prefix, rest[2..].to_string());
-    }
-    if rest.len() >= 2 && rest.starts_with("*:") {
-        return (7, prefix, rest[2..].to_string());
-    }
-    if rest.len() >= 2 && rest.starts_with("/:") {
-        return (8, prefix, rest[2..].to_string());
-    }
-    if rest.len() >= 2 && rest.starts_with("$:") {
-        return (3, prefix, rest[2..].to_string());
-    }
-    if rest.len() >= 2 && rest.starts_with("%:") {
-        return (9, prefix, rest[2..].to_string());
-    }
-    if rest.len() >= 2 && rest.starts_with("::") {
-        return (5, prefix, rest[2..].to_string());
-    }
+    try_op!("-:", 1);
+    try_op!("+:", 2);
+    try_op!("*:", 7);
+    try_op!("/:", 8);
+    try_op!("$:", 3);
+    try_op!("%:", 9);
+    try_op!("::", 5);
     if let Some(stripped) = rest.strip_prefix(':') {
         // 注意：全角冒号 ：（U+FF1A）不视为操作符，用于普通文本输出
         return (6, prefix, stripped.to_string());

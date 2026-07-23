@@ -22,6 +22,16 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::interpreter;
+use crate::analyzer::normalize_source_path as clean_path;
+
+/// DAP 模式全局事件发送器：子上下文（无 debug 句柄）的 $打印$ 等输出经此转发，
+/// 避免直接写 stdout（DAP 主线程持有 StdoutLock，print! 会死锁且污染协议流）
+static DAP_EVENT_TX: std::sync::OnceLock<Sender<DebugEvent>> = std::sync::OnceLock::new();
+
+/// 获取 DAP 全局事件发送器（非 DAP 模式返回 None）
+pub fn dap_event_tx() -> Option<&'static Sender<DebugEvent>> {
+    DAP_EVENT_TX.get()
+}
 
 // Windows: 检查 stdin 是否有可用数据（非阻塞）
 #[cfg(windows)]
@@ -209,25 +219,19 @@ fn read_message(reader: &mut io::BufReader<io::StdinLock>) -> Option<Value> {
     serde_json::from_slice(&body).ok()
 }
 
-fn send_message(writer: &mut io::StdoutLock, msg: &Value) {
+fn send_message(msg: &Value) {
     let body = serde_json::to_string(msg).unwrap_or_default();
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    // 每次发送时临时获取 stdout 锁：不能长期持有，
+    // 否则 executor 线程的 print! 会因等待 stdout 锁而死锁
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
     let _ = writer.write_all(header.as_bytes());
     let _ = writer.write_all(body.as_bytes());
     let _ = writer.flush();
 }
 
 /* ===================== 辅助函数 ===================== */
-
-/// 规范化路径：去除 Windows `\\?\` 前缀，并将反斜杠转为正斜杠（VS Code 使用正斜杠 URI）
-fn clean_path(path: &str) -> String {
-    if cfg!(windows) {
-        let stripped = path.strip_prefix("\\\\?\\").unwrap_or(path);
-        stripped.replace('\\', "/")
-    } else {
-        path.to_string()
-    }
-}
 
 fn dap_response(seq: i64, command: &str, request_seq: i64, success: bool, body: Option<Value>) -> Value {
     let mut r = json!({
@@ -249,9 +253,7 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
     eprintln!("[DAP] run_dap_server start, file_path={:?}", file_path);
 
     let stdin = io::stdin();
-    let stdout = io::stdout();
     let mut reader = io::BufReader::new(stdin.lock());
-    let mut writer = stdout.lock();
 
     let shared = Arc::new(Mutex::new(SharedDebugState::new()));
 
@@ -259,6 +261,9 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
     let (event_tx, event_rx): (Sender<DebugEvent>, Receiver<DebugEvent>) = mpsc::channel();
     let (cmd_tx, cmd_rx): (Sender<DebugCommand>, Receiver<DebugCommand>) = mpsc::channel();
     let mut cmd_rx_opt = Some(cmd_rx); // Option 包装以支持延迟移动
+
+    // 注册全局事件发送器：供无 debug 句柄的子上下文转发输出（见 dap_event_tx）
+    let _ = DAP_EVENT_TX.set(event_tx.clone());
 
     // 执行器句柄（延迟初始化：如果有文件路径则预加载，否则等 launch 请求）
     let shared_clone = shared.clone();
@@ -310,7 +315,7 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
                         }
                     });
                     seq += 1;
-                    send_message(&mut writer, &ev);
+                    send_message( &ev);
                 }
                 Ok(DebugEvent::Output(text)) => {
                     let ev = json!({
@@ -320,14 +325,14 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
                         "body": { "category": "stdout", "output": text }
                     });
                     seq += 1;
-                    send_message(&mut writer, &ev);
+                    send_message( &ev);
                 }
                 Ok(DebugEvent::Terminated) => {
                     eprintln!("[DAP] event: Terminated");
                     let ev = json!({
                         "type": "event", "seq": seq, "event": "terminated"
                     });
-                    send_message(&mut writer, &ev);
+                    send_message( &ev);
                     if let Some(h) = executor_handle.take() {
                         let _ = h.join();
                     }
@@ -369,7 +374,7 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
             "initialize" => {
                 eprintln!("[DAP] handling initialize");
                 seq += 1;
-                send_message(&mut writer, &dap_response(seq, "initialize", request_seq, true,
+                send_message( &dap_response(seq, "initialize", request_seq, true,
                     Some(json!({
                         "supportsConfigurationDoneRequest": true,
                         "supportsStepInTargetsRequest": false,
@@ -386,7 +391,7 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
                 let ev = json!({
                     "type": "event", "seq": seq, "event": "initialized",
                 });
-                send_message(&mut writer, &ev);
+                send_message( &ev);
             }
 
             "launch" => {
@@ -435,19 +440,19 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
                                     "event": "output",
                                     "body": { "category": "stderr", "output": format!("加载文件失败: {}\n", e) }
                                 });
-                                send_message(&mut writer, &ev);
+                                send_message( &ev);
                                 // 发送 terminated 避免调试会话挂起
                                 seq += 1;
                                 let term_ev = json!({
                                     "type": "event", "seq": seq, "event": "terminated"
                                 });
-                                send_message(&mut writer, &term_ev);
+                                send_message( &term_ev);
                             }
                         }
                     }
                 }
                 seq += 1;
-                send_message(&mut writer, &dap_response(seq, "launch", request_seq, true, None));
+                send_message( &dap_response(seq, "launch", request_seq, true, None));
             }
 
             "setBreakpoints" => {
@@ -496,14 +501,14 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
                 }).collect();
 
                 seq += 1;
-                send_message(&mut writer, &dap_response(seq, "setBreakpoints", request_seq, true,
+                send_message( &dap_response(seq, "setBreakpoints", request_seq, true,
                     Some(json!({ "breakpoints": confirmed }))));
             }
 
             "configurationDone" => {
                 eprintln!("[DAP] configurationDone: sending Continue to executor");
                 seq += 1;
-                send_message(&mut writer, &dap_response(seq, "configurationDone", request_seq, true, None));
+                send_message( &dap_response(seq, "configurationDone", request_seq, true, None));
                 if !launch_failed {
                     // 通知 executor 开始执行
                     let _ = cmd_tx.send(DebugCommand::Continue);
@@ -513,40 +518,40 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
 
             "continue" => {
                 seq += 1;
-                send_message(&mut writer, &dap_response(seq, "continue", request_seq, true,
+                send_message( &dap_response(seq, "continue", request_seq, true,
                     Some(json!({ "allThreadsContinued": false }))));
                 let _ = cmd_tx.send(DebugCommand::Continue);
             }
 
             "next" => {
                 seq += 1;
-                send_message(&mut writer, &dap_response(seq, "next", request_seq, true, None));
+                send_message( &dap_response(seq, "next", request_seq, true, None));
                 let depth = shared.lock().unwrap().depth;
                 let _ = cmd_tx.send(DebugCommand::Next(depth));
             }
 
             "stepIn" => {
                 seq += 1;
-                send_message(&mut writer, &dap_response(seq, "stepIn", request_seq, true, None));
+                send_message( &dap_response(seq, "stepIn", request_seq, true, None));
                 let _ = cmd_tx.send(DebugCommand::StepIn);
             }
 
             "stepOut" => {
                 seq += 1;
-                send_message(&mut writer, &dap_response(seq, "stepOut", request_seq, true, None));
+                send_message( &dap_response(seq, "stepOut", request_seq, true, None));
                 let depth = shared.lock().unwrap().depth;
                 let _ = cmd_tx.send(DebugCommand::StepOut(depth));
             }
 
             "pause" => {
                 seq += 1;
-                send_message(&mut writer, &dap_response(seq, "pause", request_seq, true, None));
+                send_message( &dap_response(seq, "pause", request_seq, true, None));
                 let _ = cmd_tx.send(DebugCommand::Pause);
             }
 
             "threads" => {
                 seq += 1;
-                send_message(&mut writer, &dap_response(seq, "threads", request_seq, true,
+                send_message( &dap_response(seq, "threads", request_seq, true,
                     Some(json!({ "threads": [{ "id": 1, "name": "main" }] }))));
             }
 
@@ -567,7 +572,7 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
                 drop(ds);
 
                 seq += 1;
-                send_message(&mut writer, &dap_response(seq, "stackTrace", request_seq, true,
+                send_message( &dap_response(seq, "stackTrace", request_seq, true,
                     Some(json!({ "stackFrames": frames, "totalFrames": frames.len() }))));
             }
 
@@ -597,7 +602,7 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
                 };
 
                 seq += 1;
-                send_message(&mut writer, &dap_response(seq, "scopes", request_seq, true,
+                send_message( &dap_response(seq, "scopes", request_seq, true,
                     Some(json!({ "scopes": scopes }))));
             }
 
@@ -617,7 +622,7 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
                         .unwrap_or_default();
                     drop(ds);
                     seq += 1;
-                    send_message(&mut writer, &dap_response(seq, "variables", request_seq, true,
+                    send_message( &dap_response(seq, "variables", request_seq, true,
                         Some(json!({ "variables": vars }))));
                 } else {
                     // 作用域引用：构建嵌套树
@@ -647,14 +652,14 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
                      drop(ds);
 
                      seq += 1;
-                    send_message(&mut writer, &dap_response(seq, "variables", request_seq, true,
+                    send_message( &dap_response(seq, "variables", request_seq, true,
                         Some(json!({ "variables": vars }))));
                 }
             }
 
             "disconnect" => {
                 seq += 1;
-                send_message(&mut writer, &dap_response(seq, "disconnect", request_seq, true, None));
+                send_message( &dap_response(seq, "disconnect", request_seq, true, None));
                 {
                     let mut ds = shared.lock().unwrap();
                     ds.terminated = true;
@@ -669,7 +674,7 @@ pub fn run_dap_server(file_path: Option<&str>) -> Result<(), String> {
             _ => {
                 // 未知命令返回成功
                 seq += 1;
-                send_message(&mut writer, &dap_response(seq, command, request_seq, true, None));
+                send_message( &dap_response(seq, command, request_seq, true, None));
             }
         }
     }
